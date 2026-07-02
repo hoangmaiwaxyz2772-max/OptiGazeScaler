@@ -334,6 +334,31 @@ bool Config::Reload(std::filesystem::path iniPath)
                 setting.has_value() && setting >= 0 && (setting < presetCount || setting == NV_PRESET_LATEST))
                 RenderPresetUltraPerformance.set_from_config(setting);
         }
+
+        // Experimental DLSS gaze ROI
+        {
+            GazeRoiEnabled.set_from_config(readBool("GazeRoi", "Enabled"));
+
+            if (auto setting = readInt("GazeRoi", "WidthPx"); setting.has_value())
+                GazeRoiWidthPx.set_from_config(std::clamp(setting.value(), 64, 8192));
+
+            if (auto setting = readInt("GazeRoi", "HeightPx"); setting.has_value())
+                GazeRoiHeightPx.set_from_config(std::clamp(setting.value(), 64, 8192));
+
+            if (auto setting = readInt("GazeRoi", "FeatherPx"); setting.has_value())
+                GazeRoiFeatherPx.set_from_config(std::clamp(setting.value(), 0, 512));
+
+            GazeRoiDebugBorder.set_from_config(readBool("GazeRoi", "DebugBorder"));
+
+            if (auto setting = readString("GazeRoi", "Control", true); setting.has_value())
+            {
+                if (setting.value() == "mouse")
+                    GazeRoiControl.set_from_config("Mouse");
+                else
+                    GazeRoiControl.set_from_config("Keyboard");
+            }
+        }
+
         // DLSSD
         {
             // Don't enable again if set false because of no nvngx found
@@ -1122,6 +1147,17 @@ bool Config::SaveIni()
                      GetIntValue(Instance()->RenderPresetUltraPerformance.value_for_config()).c_str());
         ini.SetValue("DLSS", "UseGenericAppIdWithDlss",
                      GetBoolValue(Instance()->UseGenericAppIdWithDlss.value_for_config()).c_str());
+    }
+
+    // Gaze ROI
+    {
+        ini.SetValue("GazeRoi", "Enabled", GetBoolValue(Instance()->GazeRoiEnabled.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "WidthPx", GetIntValue(Instance()->GazeRoiWidthPx.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "HeightPx", GetIntValue(Instance()->GazeRoiHeightPx.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "FeatherPx", GetIntValue(Instance()->GazeRoiFeatherPx.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "DebugBorder",
+                     GetBoolValue(Instance()->GazeRoiDebugBorder.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "Control", Instance()->GazeRoiControl.value_for_config().value_or("Keyboard").c_str());
     }
 
     // DLSSD

@@ -5623,6 +5623,78 @@ void MenuCommon::RenderMagnifierSettings(RenderMenuContext& ctx)
         ImGui::Spacing();
     }
 }
+
+void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
+{
+    auto config = ctx.config;
+
+    ImGui::Spacing();
+    if (auto ch = ScopedCollapsingHeader("Gaze ROI DLSS"); ch.IsHeaderOpen())
+    {
+        ScopedIndent indent {};
+        ImGui::Spacing();
+
+        bool enabled = config->GazeRoiEnabled.value_or_default();
+        if (ImGui::Checkbox("Enable Gaze ROI", &enabled))
+            config->GazeRoiEnabled = enabled;
+        ShowHelpMarker("Experimental D3D12 DLSS SR path. Uses a separate ROI DLSS feature and composites it back "
+                       "over a low-cost full-frame upscale.");
+
+        ImGui::BeginDisabled(!enabled);
+
+        int maxWidthPx = 8192;
+        int maxHeightPx = 8192;
+        if (ctx.currentFeature != nullptr)
+        {
+            maxWidthPx = std::max(64, static_cast<int>(ctx.currentFeature->TargetWidth()));
+            maxHeightPx = std::max(64, static_cast<int>(ctx.currentFeature->TargetHeight()));
+        }
+
+        int widthPx = std::clamp(config->GazeRoiWidthPx.value_or_default(), 64, maxWidthPx);
+        if (ImGui::InputInt("ROI Width", &widthPx, 8, 64))
+            config->GazeRoiWidthPx = std::clamp(widthPx, 64, maxWidthPx);
+        ShowHelpMarker("Target ROI width in output/upscaled pixels. Changing this rebuilds the ROI DLSS feature.");
+
+        int heightPx = std::clamp(config->GazeRoiHeightPx.value_or_default(), 64, maxHeightPx);
+        if (ImGui::InputInt("ROI Height", &heightPx, 8, 64))
+            config->GazeRoiHeightPx = std::clamp(heightPx, 64, maxHeightPx);
+        ShowHelpMarker("Target ROI height in output/upscaled pixels. The actual DLSS subrect can shift by a few pixels "
+                       "because input-space ROI dimensions are aligned for DLSS.");
+
+        if (ctx.currentFeature != nullptr)
+        {
+            const float roiPixels = static_cast<float>(widthPx) * static_cast<float>(heightPx);
+            ImGui::TextDisabled("Target output ROI: %.2f MP", roiPixels / 1000000.0f);
+        }
+
+        int feather = config->GazeRoiFeatherPx.value_or_default();
+        if (ImGui::SliderInt("Feather", &feather, 0, 512, "%d px"))
+            config->GazeRoiFeatherPx = std::clamp(feather, 0, 512);
+        ShowHelpMarker("Current MVP blends inward from the ROI edge. A later guard-band blend should avoid softening "
+                       "the foveal core.");
+
+        bool debugBorder = config->GazeRoiDebugBorder.value_or_default();
+        if (ImGui::Checkbox("Debug Border", &debugBorder))
+            config->GazeRoiDebugBorder = debugBorder;
+
+        std::string control = config->GazeRoiControl.value_or_default();
+        const char* currentControl = control == "Mouse" ? "Mouse" : "Keyboard";
+        if (ImGui::BeginCombo("Control", currentControl))
+        {
+            if (ImGui::Selectable("Mouse", control == "Mouse"))
+                config->GazeRoiControl = "Mouse";
+            if (ImGui::Selectable("Keyboard", control != "Mouse"))
+                config->GazeRoiControl = "Keyboard";
+            ImGui::EndCombo();
+        }
+
+        ImGui::TextDisabled("Keyboard: F5/F6/F7/F8 move, F9 centers.");
+
+        ImGui::EndDisabled();
+        ImGui::Spacing();
+    }
+}
+
 void MenuCommon::RenderQuirksSettings(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -6702,6 +6774,7 @@ void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
 
         // Right column: image quality, initialization, advanced options, appearance, overlay and input settings.
         RenderActiveImageSettings(ctx);
+        RenderGazeRoiSettings(ctx);
         RenderMagnifierSettings(ctx);
         RenderQuirksSettings(ctx);
         RenderAdvancedSettings(ctx);

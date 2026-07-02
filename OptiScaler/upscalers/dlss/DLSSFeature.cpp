@@ -104,6 +104,9 @@ void DLSSFeature::ProcessInitParams(NVSDK_NGX_Parameter* InParameters)
     InParameters->Set(NVSDK_NGX_Parameter_OutWidth, TargetWidth());
     InParameters->Set(NVSDK_NGX_Parameter_OutHeight, TargetHeight());
 
+    if (Config::Instance()->GazeRoiEnabled.value_or_default())
+        InParameters->Set(NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects, 1);
+
     LOG_DEBUG("Render Size: {}x{}, Target Size: {}x{}, Display Size: {}x{}", RenderWidth(), RenderHeight(),
               TargetWidth(), TargetHeight(), DisplayWidth(), DisplayHeight());
 
