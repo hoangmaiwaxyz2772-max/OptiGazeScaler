@@ -2,6 +2,17 @@
 #include "DLSSFeature_Dx12.h"
 #include <dxgi1_4.h>
 #include <Config.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
+
+#pragma comment(lib, "Ws2_32.lib")
 
 namespace
 {
@@ -55,6 +66,245 @@ static uint32_t AlignUp(uint32_t value, uint32_t alignment)
 {
     return alignment == 0 ? value : ((value + alignment - 1) / alignment) * alignment;
 }
+
+struct GazeUdpSample
+{
+    float x = 0.5f;
+    float y = 0.5f;
+    uint64_t receivedTick = 0;
+    bool valid = false;
+};
+
+bool ExtractJsonNumber(const std::string& text, const char* key, double& value)
+{
+    const std::string quotedKey = std::format("\"{}\"", key);
+    const size_t keyPos = text.find(quotedKey);
+    if (keyPos == std::string::npos)
+        return false;
+
+    const size_t colonPos = text.find(':', keyPos + quotedKey.size());
+    if (colonPos == std::string::npos)
+        return false;
+
+    const char* begin = text.c_str() + colonPos + 1;
+    char* end = nullptr;
+    value = std::strtod(begin, &end);
+    return end != begin && std::isfinite(value);
+}
+
+bool ExtractJsonBool(const std::string& text, const char* key, bool& value)
+{
+    const std::string quotedKey = std::format("\"{}\"", key);
+    const size_t keyPos = text.find(quotedKey);
+    if (keyPos == std::string::npos)
+        return false;
+
+    const size_t colonPos = text.find(':', keyPos + quotedKey.size());
+    if (colonPos == std::string::npos)
+        return false;
+
+    const size_t valuePos = text.find_first_not_of(" \t\r\n", colonPos + 1);
+    if (valuePos == std::string::npos)
+        return false;
+
+    if (text.compare(valuePos, 4, "true") == 0)
+    {
+        value = true;
+        return true;
+    }
+
+    if (text.compare(valuePos, 5, "false") == 0)
+    {
+        value = false;
+        return true;
+    }
+
+    return false;
+}
+
+bool ParseGazeUdpPacket(const char* data, int length, GazeUdpSample& sample)
+{
+    if (data == nullptr || length <= 0)
+        return false;
+
+    const std::string text(data, data + length);
+
+    double x = 0.0;
+    double y = 0.0;
+    if (!ExtractJsonNumber(text, "x", x) || !ExtractJsonNumber(text, "y", y))
+        return false;
+
+    bool valid = true;
+    ExtractJsonBool(text, "valid", valid);
+
+    double width = 0.0;
+    double height = 0.0;
+    const bool hasDimensions = ExtractJsonNumber(text, "width", width) && ExtractJsonNumber(text, "height", height) &&
+                               width > 0.0 && height > 0.0;
+
+    if (hasDimensions)
+    {
+        x /= width;
+        y /= height;
+    }
+    else if (x < 0.0 || x > 1.0 || y < 0.0 || y > 1.0)
+    {
+        return false;
+    }
+
+    sample.x = std::clamp(static_cast<float>(x), 0.0f, 1.0f);
+    sample.y = std::clamp(static_cast<float>(y), 0.0f, 1.0f);
+    sample.valid = valid;
+    sample.receivedTick = GetTickCount64();
+    return true;
+}
+
+class GazeUdpReceiver
+{
+  public:
+    static GazeUdpReceiver& Instance()
+    {
+        static GazeUdpReceiver receiver;
+        return receiver;
+    }
+
+    bool EnsureStarted(int port)
+    {
+        port = std::clamp(port, 1024, 65535);
+
+        if (_running.load() && _port == port)
+            return true;
+
+        Stop();
+
+        const uint64_t now = GetTickCount64();
+        if (_lastFailedPort == port && now - _lastFailureTick < 2000)
+            return false;
+
+        WSADATA wsaData {};
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+        {
+            MarkFailure(port);
+            LOG_WARN("Gaze ROI UDP failed to initialize Winsock");
+            return false;
+        }
+
+        SOCKET socketHandle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (socketHandle == INVALID_SOCKET)
+        {
+            WSACleanup();
+            MarkFailure(port);
+            LOG_WARN("Gaze ROI UDP failed to create socket");
+            return false;
+        }
+
+        u_long nonBlocking = 1;
+        ioctlsocket(socketHandle, FIONBIO, &nonBlocking);
+
+        sockaddr_in address {};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(static_cast<u_short>(port));
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+
+        if (bind(socketHandle, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == SOCKET_ERROR)
+        {
+            closesocket(socketHandle);
+            WSACleanup();
+            MarkFailure(port);
+            LOG_WARN("Gaze ROI UDP failed to bind 127.0.0.1:{}", port);
+            return false;
+        }
+
+        _socket = socketHandle;
+        _port = port;
+        _stop.store(false);
+        _running.store(true);
+        _thread = std::thread([this]() { ReceiveLoop(); });
+        LOG_INFO("Gaze ROI UDP listening on 127.0.0.1:{}", port);
+        return true;
+    }
+
+    void Stop()
+    {
+        if (!_running.exchange(false))
+            return;
+
+        _stop.store(true);
+        if (_socket != INVALID_SOCKET)
+        {
+            closesocket(_socket);
+            _socket = INVALID_SOCKET;
+        }
+
+        if (_thread.joinable())
+            _thread.join();
+
+        WSACleanup();
+    }
+
+    bool TryGetFreshSample(int staleMs, GazeUdpSample& sample)
+    {
+        std::lock_guard lock(_sampleMutex);
+        if (!_sample.valid)
+            return false;
+
+        const uint64_t now = GetTickCount64();
+        if (now - _sample.receivedTick > static_cast<uint64_t>(std::max(1, staleMs)))
+            return false;
+
+        sample = _sample;
+        return true;
+    }
+
+    ~GazeUdpReceiver() { Stop(); }
+
+  private:
+    void ReceiveLoop()
+    {
+        char buffer[1024] {};
+        while (!_stop.load())
+        {
+            sockaddr_in from {};
+            int fromLength = sizeof(from);
+            const int received =
+                recvfrom(_socket, buffer, static_cast<int>(sizeof(buffer)), 0, reinterpret_cast<sockaddr*>(&from),
+                         &fromLength);
+
+            if (received > 0)
+            {
+                GazeUdpSample sample {};
+                if (ParseGazeUdpPacket(buffer, received, sample))
+                {
+                    std::lock_guard lock(_sampleMutex);
+                    _sample = sample;
+                }
+                continue;
+            }
+
+            const int error = WSAGetLastError();
+            if (error != WSAEWOULDBLOCK && error != WSAENOTSOCK && !_stop.load())
+                Sleep(5);
+            else
+                Sleep(1);
+        }
+    }
+
+    void MarkFailure(int port)
+    {
+        _lastFailedPort = port;
+        _lastFailureTick = GetTickCount64();
+    }
+
+    std::atomic<bool> _running { false };
+    std::atomic<bool> _stop { false };
+    SOCKET _socket = INVALID_SOCKET;
+    std::thread _thread {};
+    std::mutex _sampleMutex {};
+    GazeUdpSample _sample {};
+    int _port = 0;
+    int _lastFailedPort = 0;
+    uint64_t _lastFailureTick = 0;
+};
 } // namespace
 
 bool DLSSFeatureDx12::InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
@@ -178,6 +428,31 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
 void DLSSFeatureDx12::UpdateVirtualGazePoint()
 {
     const std::string control = Config::Instance()->GazeRoiControl.value_or_default();
+
+    if (control == "ExternalUdp")
+    {
+        auto& receiver = GazeUdpReceiver::Instance();
+        if (!receiver.EnsureStarted(Config::Instance()->GazeRoiUdpPort.value_or_default()))
+        {
+            _gazeHasPreviousInputRect = false;
+            return;
+        }
+
+        GazeUdpSample sample {};
+        if (receiver.TryGetFreshSample(Config::Instance()->GazeRoiStaleMs.value_or_default(), sample))
+        {
+            _gazePointX = sample.x;
+            _gazePointY = sample.y;
+        }
+        else
+        {
+            _gazeHasPreviousInputRect = false;
+        }
+
+        return;
+    }
+
+    GazeUdpReceiver::Instance().Stop();
 
     if (control == "Mouse")
     {
@@ -419,6 +694,12 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
         return false;
     }
 
+    if (!GazeRoi->CreatePeripheralResource(Device, color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        LOG_WARN("Gaze ROI disabled for this frame: peripheral resource create failed");
+        return false;
+    }
+
     if (GazeRoiMvPatch == nullptr || !GazeRoiMvPatch->IsInit() ||
         !GazeRoiMvPatch->CreatePatchedResource(Device, motionVectors, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
     {
@@ -488,6 +769,11 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
         mvScaleX = 1.0f;
     if (std::abs(mvScaleY) < 0.0001f)
         mvScaleY = 1.0f;
+
+    float jitterOffsetX = 0.0f;
+    float jitterOffsetY = 0.0f;
+    InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &jitterOffsetX);
+    InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &jitterOffsetY);
 
     float rawMvOffsetX = 0.0f;
     float rawMvOffsetY = 0.0f;
@@ -605,6 +891,18 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
     constants.roiHeight = static_cast<int32_t>(outputRect.height);
     constants.featherPx = Config::Instance()->GazeRoiFeatherPx.value_or_default();
     constants.debugBorderPx = Config::Instance()->GazeRoiDebugBorder.value_or_default() ? 2 : 0;
+    constants.peripheralBlur = Config::Instance()->GazeRoiPeripheralBlur.value_or_default() ? 1 : 0;
+    constants.peripheralBlurRadius =
+        std::clamp(Config::Instance()->GazeRoiPeripheralBlurRadius.value_or_default(), 0.0f, 3.0f);
+    constants.peripheralJitterCancel = Config::Instance()->GazeRoiPeripheralJitterCancel.value_or_default() ? 1 : 0;
+    constants.peripheralJitterSign = Config::Instance()->GazeRoiPeripheralJitterSign.value_or_default() < 0 ? -1 : 1;
+    constants.jitterOffsetX = jitterOffsetX;
+    constants.jitterOffsetY = jitterOffsetY;
+    constants.peripheralTemporal = Config::Instance()->GazeRoiPeripheralTemporal.value_or_default() ? 1 : 0;
+    constants.peripheralTemporalCurrentWeight =
+        std::clamp(Config::Instance()->GazeRoiPeripheralTemporalCurrentWeight.value_or_default(), 0.02f, 1.0f);
+    constants.peripheralTemporalReactiveScale =
+        std::clamp(Config::Instance()->GazeRoiPeripheralTemporalReactiveScale.value_or_default(), 0.0f, 16.0f);
 
     if (!GazeRoi->Dispatch(InCommandList, color, output, constants))
     {

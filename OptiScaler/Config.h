@@ -416,8 +416,17 @@ class Config
     CustomOptional<int> GazeRoiWidthPx { 1280 };
     CustomOptional<int> GazeRoiHeightPx { 720 };
     CustomOptional<int> GazeRoiFeatherPx { 96 };
+    CustomOptional<bool> GazeRoiPeripheralBlur { true };
+    CustomOptional<float> GazeRoiPeripheralBlurRadius { 1.0f };
+    CustomOptional<bool> GazeRoiPeripheralJitterCancel { true };
+    CustomOptional<int> GazeRoiPeripheralJitterSign { 1 };
+    CustomOptional<bool> GazeRoiPeripheralTemporal { true };
+    CustomOptional<float> GazeRoiPeripheralTemporalCurrentWeight { 0.2f };
+    CustomOptional<float> GazeRoiPeripheralTemporalReactiveScale { 4.0f };
     CustomOptional<bool> GazeRoiDebugBorder { false };
     CustomOptional<std::string> GazeRoiControl { "Keyboard" };
+    CustomOptional<int> GazeRoiUdpPort { 38479 };
+    CustomOptional<int> GazeRoiStaleMs { 50 };
 
     CustomOptional<int32_t, NoDefault> ColorResourceBarrier;    // disabled by default
     CustomOptional<int32_t, NoDefault> MVResourceBarrier;       // disabled by default

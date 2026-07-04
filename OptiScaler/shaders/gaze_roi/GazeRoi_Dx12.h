@@ -31,8 +31,16 @@ struct alignas(256) GazeRoiConstants
     int32_t roiHeight = 0;
     int32_t featherPx = 96;
     int32_t debugBorderPx = 2;
-    int32_t _pad1 = 0;
-    int32_t _pad2 = 0;
+    int32_t peripheralBlur = 1;
+    float peripheralBlurRadius = 1.0f;
+    int32_t peripheralJitterCancel = 1;
+    int32_t peripheralJitterSign = 1;
+    float jitterOffsetX = 0.0f;
+    float jitterOffsetY = 0.0f;
+    int32_t peripheralTemporal = 1;
+    float peripheralTemporalCurrentWeight = 0.2f;
+    float peripheralTemporalReactiveScale = 4.0f;
+    int32_t peripheralTemporalInitialized = 0;
 };
 
 struct alignas(256) GazeRoiMvConstants
@@ -71,9 +79,18 @@ class GazeRoi_Dx12 : public Shader_Dx12
 {
   private:
     FrameDescriptorHeap _frameHeaps[GAZE_ROI_NUM_OF_HEAPS];
+    FrameDescriptorHeap _peripheralFrameHeaps[GAZE_ROI_NUM_OF_HEAPS];
 
     ID3D12Resource* _dlssOutput = nullptr;
     D3D12_RESOURCE_STATES _dlssOutputState = D3D12_RESOURCE_STATE_COMMON;
+    ID3D12Resource* _peripheralOutput = nullptr;
+    D3D12_RESOURCE_STATES _peripheralOutputState = D3D12_RESOURCE_STATE_COMMON;
+    ID3D12Resource* _peripheralHistory[2] = { nullptr, nullptr };
+    D3D12_RESOURCE_STATES _peripheralHistoryState[2] = { D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON };
+    uint32_t _peripheralHistoryIndex = 0;
+    bool _peripheralHistoryInitialized = false;
+    ID3D12PipelineState* _peripheralPipelineState = nullptr;
+    ID3D12Resource* _peripheralConstantBuffer = nullptr;
 
     uint32_t _numThreadsX = 16;
     uint32_t _numThreadsY = 16;
@@ -81,7 +98,10 @@ class GazeRoi_Dx12 : public Shader_Dx12
   public:
     bool CreateDlssOutputResource(ID3D12Device* device, ID3D12Resource* outputTemplate,
                                   D3D12_RESOURCE_STATES initialState);
+    bool CreatePeripheralResource(ID3D12Device* device, ID3D12Resource* colorTemplate,
+                                  D3D12_RESOURCE_STATES initialState);
     void SetDlssOutputState(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES state);
+    void SetPeripheralOutputState(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES state);
     bool Dispatch(ID3D12GraphicsCommandList* commandList, ID3D12Resource* lowResColor,
                   ID3D12Resource* finalOutput, const GazeRoiConstants& constants);
 
