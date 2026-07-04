@@ -59,6 +59,7 @@
 - New project - [**OptiPatcher**](https://github.com/optiscaler/OptiPatcher) - an ASI Plugin for OptiScaler for enabling DLSS and DLSSG inputs without spoofing in ***supported games***.
 - Since v0.7.8, OptiScaler is now automatically applying certain game patches for a better out-of-the-box experience
 - Since v0.9.0, separated FG Inputs and Outputs, added XeFG and FSR4-FG support, as well as bundled Fakenvapi and Nukem's FSR3-FG mod
+- Experimental branch note: a D3D12 DLSS gaze ROI MVP is documented in [docs/GazeRoiMVP.md](docs/GazeRoiMVP.md), with external gaze input in [docs/GazeRoiExternalInput.md](docs/GazeRoiExternalInput.md).
 - For a detailed list of all features, check [Features](Features.md)
 
 

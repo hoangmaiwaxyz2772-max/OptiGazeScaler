@@ -5637,6 +5637,146 @@ void MenuCommon::RenderMagnifierSettings(RenderMenuContext& ctx)
         ImGui::Spacing();
     }
 }
+
+void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
+{
+    auto config = ctx.config;
+
+    ImGui::Spacing();
+    if (auto ch = ScopedCollapsingHeader("Gaze ROI DLSS"); ch.IsHeaderOpen())
+    {
+        ScopedIndent indent {};
+        ImGui::Spacing();
+
+        bool enabled = config->GazeRoiEnabled.value_or_default();
+        if (ImGui::Checkbox("Enable Gaze ROI", &enabled))
+            config->GazeRoiEnabled = enabled;
+        ShowHelpMarker("Experimental D3D12 DLSS SR path. Uses a separate ROI DLSS feature and composites it back "
+                       "over a low-cost full-frame upscale.");
+
+        ImGui::BeginDisabled(!enabled);
+
+        int maxWidthPx = 8192;
+        int maxHeightPx = 8192;
+        if (ctx.currentFeature != nullptr)
+        {
+            maxWidthPx = std::max(64, static_cast<int>(ctx.currentFeature->TargetWidth()));
+            maxHeightPx = std::max(64, static_cast<int>(ctx.currentFeature->TargetHeight()));
+        }
+
+        int widthPx = std::clamp(config->GazeRoiWidthPx.value_or_default(), 64, maxWidthPx);
+        if (ImGui::InputInt("ROI Width", &widthPx, 8, 64))
+            config->GazeRoiWidthPx = std::clamp(widthPx, 64, maxWidthPx);
+        ShowHelpMarker("Target ROI width in output/upscaled pixels. Changing this rebuilds the ROI DLSS feature.");
+
+        int heightPx = std::clamp(config->GazeRoiHeightPx.value_or_default(), 64, maxHeightPx);
+        if (ImGui::InputInt("ROI Height", &heightPx, 8, 64))
+            config->GazeRoiHeightPx = std::clamp(heightPx, 64, maxHeightPx);
+        ShowHelpMarker("Target ROI height in output/upscaled pixels. The actual DLSS subrect can shift by a few pixels "
+                       "because input-space ROI dimensions are aligned for DLSS.");
+
+        if (ctx.currentFeature != nullptr)
+        {
+            const float roiPixels = static_cast<float>(widthPx) * static_cast<float>(heightPx);
+            ImGui::TextDisabled("Target output ROI: %.2f MP", roiPixels / 1000000.0f);
+        }
+
+        int feather = config->GazeRoiFeatherPx.value_or_default();
+        if (ImGui::SliderInt("Feather", &feather, 0, 512, "%d px"))
+            config->GazeRoiFeatherPx = std::clamp(feather, 0, 512);
+        ShowHelpMarker("Current MVP blends inward from the ROI edge. A later guard-band blend should avoid softening "
+                       "the foveal core.");
+
+        bool peripheralBlur = config->GazeRoiPeripheralBlur.value_or_default();
+        if (ImGui::Checkbox("Peripheral Blur", &peripheralBlur))
+            config->GazeRoiPeripheralBlur = peripheralBlur;
+        ShowHelpMarker("Applies a single-frame 9-tap tent blur to the low-cost peripheral upscale. It does not use "
+                       "temporal history.");
+
+        ImGui::BeginDisabled(!peripheralBlur);
+        float peripheralBlurRadius = config->GazeRoiPeripheralBlurRadius.value_or_default();
+        if (ImGui::SliderFloat("Blur Radius", &peripheralBlurRadius, 0.0f, 3.0f, "%.2f"))
+            config->GazeRoiPeripheralBlurRadius = std::clamp(peripheralBlurRadius, 0.0f, 3.0f);
+        ShowHelpMarker("Radius is measured in low-resolution source texels, not output pixels.");
+        ImGui::EndDisabled();
+
+        bool peripheralJitterCancel = config->GazeRoiPeripheralJitterCancel.value_or_default();
+        if (ImGui::Checkbox("Peripheral Jitter Cancel", &peripheralJitterCancel))
+            config->GazeRoiPeripheralJitterCancel = peripheralJitterCancel;
+        ShowHelpMarker("Offsets low-resolution peripheral sampling by the DLSS jitter offset before blur. This is a "
+                       "spatial de-jitter step, not temporal accumulation.");
+
+        ImGui::BeginDisabled(!peripheralJitterCancel);
+        int jitterSign = config->GazeRoiPeripheralJitterSign.value_or_default() < 0 ? -1 : 1;
+        const char* currentJitterSign = jitterSign < 0 ? "-1" : "+1";
+        if (ImGui::BeginCombo("Jitter Sign", currentJitterSign))
+        {
+            if (ImGui::Selectable("+1", jitterSign > 0))
+                config->GazeRoiPeripheralJitterSign = 1;
+            if (ImGui::Selectable("-1", jitterSign < 0))
+                config->GazeRoiPeripheralJitterSign = -1;
+            ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+
+        bool peripheralTemporal = config->GazeRoiPeripheralTemporal.value_or_default();
+        if (ImGui::Checkbox("Peripheral Temporal Stabilizer", &peripheralTemporal))
+            config->GazeRoiPeripheralTemporal = peripheralTemporal;
+        ShowHelpMarker("Low-resolution temporal accumulation for the peripheral image. It uses current-frame "
+                       "neighborhood clipping to reduce shimmer while limiting ghosting.");
+
+        ImGui::BeginDisabled(!peripheralTemporal);
+        float temporalCurrentWeight =
+            std::clamp(config->GazeRoiPeripheralTemporalCurrentWeight.value_or_default(), 0.02f, 1.0f);
+        if (ImGui::SliderFloat("Temporal Current Weight", &temporalCurrentWeight, 0.02f, 1.0f, "%.2f"))
+            config->GazeRoiPeripheralTemporalCurrentWeight = std::clamp(temporalCurrentWeight, 0.02f, 1.0f);
+        ShowHelpMarker("Lower values keep more history and reduce shimmer. Higher values follow motion faster.");
+
+        float temporalReactiveScale =
+            std::clamp(config->GazeRoiPeripheralTemporalReactiveScale.value_or_default(), 0.0f, 16.0f);
+        if (ImGui::SliderFloat("Temporal Reactive Scale", &temporalReactiveScale, 0.0f, 16.0f, "%.1f"))
+            config->GazeRoiPeripheralTemporalReactiveScale = std::clamp(temporalReactiveScale, 0.0f, 16.0f);
+        ShowHelpMarker("Raises the current-frame weight when current and history differ. Increase it if camera motion "
+                       "leaves peripheral trails.");
+        ImGui::EndDisabled();
+
+        bool debugBorder = config->GazeRoiDebugBorder.value_or_default();
+        if (ImGui::Checkbox("Debug Border", &debugBorder))
+            config->GazeRoiDebugBorder = debugBorder;
+
+        std::string control = config->GazeRoiControl.value_or_default();
+        const char* currentControl = control == "Mouse" ? "Mouse" : control == "ExternalUdp" ? "ExternalUdp" : "Keyboard";
+        if (ImGui::BeginCombo("Control", currentControl))
+        {
+            if (ImGui::Selectable("Mouse", control == "Mouse"))
+                config->GazeRoiControl = "Mouse";
+            if (ImGui::Selectable("ExternalUdp", control == "ExternalUdp"))
+                config->GazeRoiControl = "ExternalUdp";
+            if (ImGui::Selectable("Keyboard", control != "Mouse" && control != "ExternalUdp"))
+                config->GazeRoiControl = "Keyboard";
+            ImGui::EndCombo();
+        }
+
+        if (config->GazeRoiControl.value_or_default() == "ExternalUdp")
+        {
+            int udpPort = std::clamp(config->GazeRoiUdpPort.value_or_default(), 1024, 65535);
+            if (ImGui::InputInt("UDP Port", &udpPort, 1, 100))
+                config->GazeRoiUdpPort = std::clamp(udpPort, 1024, 65535);
+
+            int staleMs = std::clamp(config->GazeRoiStaleMs.value_or_default(), 1, 1000);
+            if (ImGui::InputInt("Stale", &staleMs, 1, 10))
+                config->GazeRoiStaleMs = std::clamp(staleMs, 1, 1000);
+            ShowHelpMarker("External gaze packets are read from localhost UDP. Stale is the age in milliseconds after "
+                           "which motion-vector history is reset until fresh gaze data arrives.");
+        }
+
+        ImGui::TextDisabled("Keyboard: F5/F6/F7/F8 move, F9 centers.");
+
+        ImGui::EndDisabled();
+        ImGui::Spacing();
+    }
+}
+
 void MenuCommon::RenderQuirksSettings(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -6716,6 +6856,7 @@ void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
 
         // Right column: image quality, initialization, advanced options, appearance, overlay and input settings.
         RenderActiveImageSettings(ctx);
+        RenderGazeRoiSettings(ctx);
         RenderMagnifierSettings(ctx);
         RenderQuirksSettings(ctx);
         RenderAdvancedSettings(ctx);

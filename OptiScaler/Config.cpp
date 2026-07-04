@@ -334,6 +334,57 @@ bool Config::Reload(std::filesystem::path iniPath)
                 setting.has_value() && setting >= 0 && (setting < presetCount || setting == NV_PRESET_LATEST))
                 RenderPresetUltraPerformance.set_from_config(setting);
         }
+
+        // Experimental DLSS gaze ROI
+        {
+            GazeRoiEnabled.set_from_config(readBool("GazeRoi", "Enabled"));
+
+            if (auto setting = readInt("GazeRoi", "WidthPx"); setting.has_value())
+                GazeRoiWidthPx.set_from_config(std::clamp(setting.value(), 64, 8192));
+
+            if (auto setting = readInt("GazeRoi", "HeightPx"); setting.has_value())
+                GazeRoiHeightPx.set_from_config(std::clamp(setting.value(), 64, 8192));
+
+            if (auto setting = readInt("GazeRoi", "FeatherPx"); setting.has_value())
+                GazeRoiFeatherPx.set_from_config(std::clamp(setting.value(), 0, 512));
+
+            GazeRoiPeripheralBlur.set_from_config(readBool("GazeRoi", "PeripheralBlur"));
+
+            if (auto setting = readFloat("GazeRoi", "PeripheralBlurRadius"); setting.has_value())
+                GazeRoiPeripheralBlurRadius.set_from_config(std::clamp(setting.value(), 0.0f, 3.0f));
+
+            GazeRoiPeripheralJitterCancel.set_from_config(readBool("GazeRoi", "PeripheralJitterCancel"));
+
+            if (auto setting = readInt("GazeRoi", "PeripheralJitterSign"); setting.has_value())
+                GazeRoiPeripheralJitterSign.set_from_config(setting.value() < 0 ? -1 : 1);
+
+            GazeRoiPeripheralTemporal.set_from_config(readBool("GazeRoi", "PeripheralTemporal"));
+
+            if (auto setting = readFloat("GazeRoi", "PeripheralTemporalCurrentWeight"); setting.has_value())
+                GazeRoiPeripheralTemporalCurrentWeight.set_from_config(std::clamp(setting.value(), 0.02f, 1.0f));
+
+            if (auto setting = readFloat("GazeRoi", "PeripheralTemporalReactiveScale"); setting.has_value())
+                GazeRoiPeripheralTemporalReactiveScale.set_from_config(std::clamp(setting.value(), 0.0f, 16.0f));
+
+            GazeRoiDebugBorder.set_from_config(readBool("GazeRoi", "DebugBorder"));
+
+            if (auto setting = readString("GazeRoi", "Control", true); setting.has_value())
+            {
+                if (setting.value() == "mouse")
+                    GazeRoiControl.set_from_config("Mouse");
+                else if (setting.value() == "externaludp")
+                    GazeRoiControl.set_from_config("ExternalUdp");
+                else
+                    GazeRoiControl.set_from_config("Keyboard");
+            }
+
+            if (auto setting = readInt("GazeRoi", "UdpPort"); setting.has_value())
+                GazeRoiUdpPort.set_from_config(std::clamp(setting.value(), 1024, 65535));
+
+            if (auto setting = readInt("GazeRoi", "StaleMs"); setting.has_value())
+                GazeRoiStaleMs.set_from_config(std::clamp(setting.value(), 1, 1000));
+        }
+
         // DLSSD
         {
             // Don't enable again if set false because of no nvngx found
@@ -1122,6 +1173,33 @@ bool Config::SaveIni()
                      GetIntValue(Instance()->RenderPresetUltraPerformance.value_for_config()).c_str());
         ini.SetValue("DLSS", "UseGenericAppIdWithDlss",
                      GetBoolValue(Instance()->UseGenericAppIdWithDlss.value_for_config()).c_str());
+    }
+
+    // Gaze ROI
+    {
+        ini.SetValue("GazeRoi", "Enabled", GetBoolValue(Instance()->GazeRoiEnabled.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "WidthPx", GetIntValue(Instance()->GazeRoiWidthPx.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "HeightPx", GetIntValue(Instance()->GazeRoiHeightPx.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "FeatherPx", GetIntValue(Instance()->GazeRoiFeatherPx.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralBlur",
+                     GetBoolValue(Instance()->GazeRoiPeripheralBlur.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralBlurRadius",
+                     GetFloatValue(Instance()->GazeRoiPeripheralBlurRadius.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralJitterCancel",
+                     GetBoolValue(Instance()->GazeRoiPeripheralJitterCancel.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralJitterSign",
+                     GetIntValue(Instance()->GazeRoiPeripheralJitterSign.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralTemporal",
+                     GetBoolValue(Instance()->GazeRoiPeripheralTemporal.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralTemporalCurrentWeight",
+                     GetFloatValue(Instance()->GazeRoiPeripheralTemporalCurrentWeight.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralTemporalReactiveScale",
+                     GetFloatValue(Instance()->GazeRoiPeripheralTemporalReactiveScale.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "DebugBorder",
+                     GetBoolValue(Instance()->GazeRoiDebugBorder.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "Control", Instance()->GazeRoiControl.value_for_config().value_or("Keyboard").c_str());
+        ini.SetValue("GazeRoi", "UdpPort", GetIntValue(Instance()->GazeRoiUdpPort.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "StaleMs", GetIntValue(Instance()->GazeRoiStaleMs.value_for_config()).c_str());
     }
 
     // DLSSD
