@@ -1,3 +1,29 @@
+# Experimental Fork Notice
+
+This is a personal experimental fork of OptiScaler. It is not an official upstream OptiScaler release.
+
+This branch adds an experimental D3D12 DLSS Super Resolution ROI prototype for gaze-driven local upscaling. The idea is to run the expensive upscaler only around the gaze region, while the peripheral image uses cheaper upscaling, blur, and lightweight temporal stabilization.
+
+The feature is still a research prototype intended for experiments and real-game testing. It is not a stable feature, and compatibility with all games is not guaranteed. Other OptiScaler features have not been fully tested with this experiment and may conflict with it.
+
+## Current Scope
+
+- The current implementation targets **D3D12 + DLSS Super Resolution**.
+- It has been observed to work together with **FSR 3 Frame Generation**.
+- Other upscalers, frame generation methods, and graphics APIs are theoretically possible, but each path needs separate adaptation.
+- It is not suitable for direct use with Ray Reconstruction models: the image before and after ray reconstruction can differ substantially, making local processing harder to match with a cheaper peripheral image.
+
+## Goal And Potential Benefit
+
+The goal is to reduce the GPU cost of expensive upscaling models by processing only the region the user is looking at, while using a cheaper path for the peripheral image.
+
+Even without dedicated eye-tracking hardware, ordinary camera-based gaze estimation can provide a usable gaze point. The gaze region also does not need to be tiny: even a large ROI covering roughly half of the output pixels can significantly reduce the DLSS work area, theoretically approaching a halving of DLSS cost. With a large ROI, the transition boundary is farther from the visual center, which also makes peripheral stability and blending issues easier to hide.
+
+For the original OptiScaler project, official releases, and upstream documentation, see:
+https://github.com/optiscaler/OptiScaler
+
+---
+
 <div align="center">
 
   ![Logo](https://github.com/user-attachments/assets/c7dad5da-0b29-4710-8a57-b58e4e407abd)
@@ -59,7 +85,6 @@
 - New project - [**OptiPatcher**](https://github.com/optiscaler/OptiPatcher) - an ASI Plugin for OptiScaler for enabling DLSS and DLSSG inputs without spoofing in ***supported games***.
 - Since v0.7.8, OptiScaler is now automatically applying certain game patches for a better out-of-the-box experience
 - Since v0.9.0, separated FG Inputs and Outputs, added XeFG and FSR4-FG support, as well as bundled Fakenvapi and Nukem's FSR3-FG mod
-- Experimental branch note: a D3D12 DLSS gaze ROI MVP is documented in [docs/GazeRoiMVP.md](docs/GazeRoiMVP.md), with external gaze input in [docs/GazeRoiExternalInput.md](docs/GazeRoiExternalInput.md).
 - For a detailed list of all features, check [Features](Features.md)
 
 
