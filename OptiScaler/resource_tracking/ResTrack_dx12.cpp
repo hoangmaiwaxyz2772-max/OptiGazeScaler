@@ -6,6 +6,7 @@
 #include <Util.h>
 
 #include <menu/menu_overlay_dx.h>
+#include <shaders/gaze_roi/GazeRoi_Dx12.h>
 
 #include <algorithm>
 #include <future>
@@ -797,6 +798,7 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
         if (!found.empty())
         {
             o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
+            GazeRoiFrameSync::OnExecuteCommandLists(This, NumCommandLists, ppCommandLists);
 
             for (size_t i = 0; i < found.size(); i++)
             {
@@ -810,6 +812,7 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
     LOG_TRACK("Done NumCommandLists: {}", NumCommandLists);
 
     o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
+    GazeRoiFrameSync::OnExecuteCommandLists(This, NumCommandLists, ppCommandLists);
 }
 
 #pragma region Heap hooks
@@ -2081,6 +2084,13 @@ void ResTrack_Dx12::HookToQueue(ID3D12Device* InDevice)
 
         queue->Release();
     }
+}
+
+void ResTrack_Dx12::EnsureQueueHook(ID3D12Device* device)
+{
+    static std::mutex queueHookMutex;
+    std::lock_guard lock(queueHookMutex);
+    HookToQueue(device);
 }
 
 void ResTrack_Dx12::HookDevice(ID3D12Device* device)

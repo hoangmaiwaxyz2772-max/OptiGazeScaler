@@ -2,25 +2,26 @@
 
 This document describes the first external gaze input path for the experimental DLSS Gaze ROI MVP.
 
+Last checked: 2026-07-25. The shared-memory bridge build and WebSocket-to-slot smoke test pass; the stale-input history-preservation repair is compiled and deployed pending real-game validation.
+
 ## Data Path
 
 ```text
 eye-tracking webpage
   -> WebSocket ws://127.0.0.1:38478
-Node bridge
-  -> UDP 127.0.0.1:38479
+Shared-memory bridge
+  -> Windows shared memory Local\EyeTracingGazeV1
 OptiScaler Gaze ROI
 ```
 
-The browser never sends UDP directly. The Node bridge receives WebSocket messages and forwards compact JSON packets over localhost UDP. OptiScaler only listens on `127.0.0.1`, so the receiver is not exposed to the LAN.
+The browser still sends WebSocket messages, but the bridge writes only the latest gaze sample to a single shared-memory slot. OptiScaler reads that slot every frame with a seqlock-style `seq` field, avoiding UDP/socket buffering and stale queued samples.
 
 ## OptiScaler Settings
 
 Open the OptiScaler overlay:
 
 - Enable **Gaze ROI DLSS**.
-- Set **Control** to `ExternalUdp`.
-- Leave **UDP Port** at `38479`, unless the bridge is configured differently.
+- Set **Control** to `ExternalSharedMemory`.
 - Leave **Stale** at `50 ms` for the first tests.
 
 Equivalent INI:
@@ -28,8 +29,7 @@ Equivalent INI:
 ```ini
 [GazeRoi]
 Enabled=true
-Control=ExternalUdp
-UdpPort=38479
+Control=ExternalSharedMemory
 StaleMs=50
 WidthPx=960
 HeightPx=960
@@ -42,9 +42,28 @@ DebugBorder=true
 
 `WidthPx` and `HeightPx` are output/upscaled pixels. For eye tracking, start with a square ROI.
 
-## Start The Node Bridge
+## Start The Shared-Memory Bridge
 
 From the repository root:
+
+```powershell
+cd tools\gaze_roi_shared_bridge
+dotnet run
+```
+
+Optional environment variables:
+
+```powershell
+$env:GAZE_WS_PORT=38478
+$env:GAZE_SHM_NAME="Local\EyeTracingGazeV1"
+dotnet run
+```
+
+Or run `tools\gaze_roi_shared_bridge\start-shared-bridge.bat`.
+
+## Legacy UDP Bridge
+
+The old Node UDP bridge remains available for comparison:
 
 ```powershell
 cd tools\gaze_roi_bridge
@@ -52,13 +71,7 @@ npm install
 npm start
 ```
 
-Optional environment variables:
-
-```powershell
-$env:GAZE_WS_PORT=38478
-$env:GAZE_UDP_PORT=38479
-npm start
-```
+Use `Control=ExternalUdp` and `UdpPort=38479` when testing the legacy path.
 
 ## WebSocket Message Format
 
@@ -118,6 +131,8 @@ function sendGaze(sample) {
 ## Runtime Behavior
 
 - OptiScaler uses only the latest fresh packet.
-- If no fresh valid packet arrives within `StaleMs`, the ROI stays at the last position but motion-vector ROI history is reset.
+- If no fresh valid packet arrives within `StaleMs`, the ROI freezes at the last accepted position and private DLSS continues accumulating history for that fixed ROI. A temporarily slow tracker or stopped bridge must not turn every rendered frame into a DLSS reset frame.
 - `valid=false` packets are accepted by the bridge but ignored by OptiScaler as active gaze.
-- Lost UDP packets are fine; the stream is treated as realtime state, not reliable history.
+- Dropped or overwritten gaze updates are fine; the stream is treated as realtime state, not reliable history.
+- Logs report `[GROI_INPUT] ... source is fresh` and transitions to unavailable/invalid/stale. The latter is a freeze notification, not a rendering failure.
+- Keep **Current Color Point Bypass** disabled for normal use. If enabled, private DLSS is deliberately skipped and the ROI is point-scaled current Color; the overlay now displays a red warning while this diagnostic is active.

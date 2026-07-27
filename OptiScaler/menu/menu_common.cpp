@@ -2822,6 +2822,8 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
             if (usesDlssd)
             {
+                ImGui::Spacing();
+
                 if (bool pOverride = config->DLSSDRenderPresetOverride.value_or_default();
                     ImGui::Checkbox("Render Presets Override", &pOverride))
                     config->DLSSDRenderPresetOverride = pOverride;
@@ -5641,18 +5643,37 @@ void MenuCommon::RenderMagnifierSettings(RenderMenuContext& ctx)
 void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
 {
     auto config = ctx.config;
+    const bool usesDlssd = ctx.currentFeature != nullptr &&
+                           ctx.currentFeature->GetUpscalerType() == Upscaler::DLSSD;
+    const bool usesDlss = ctx.currentFeature != nullptr &&
+                          ctx.currentFeature->GetUpscalerType() == Upscaler::DLSS;
+    if (!usesDlss && !usesDlssd)
+        return;
 
     ImGui::Spacing();
-    if (auto ch = ScopedCollapsingHeader("Gaze ROI DLSS"); ch.IsHeaderOpen())
+    if (auto ch = ScopedCollapsingHeader(usesDlssd ? "Gaze ROI Ray Reconstruction" : "Gaze ROI DLSS");
+        ch.IsHeaderOpen())
     {
         ScopedIndent indent {};
         ImGui::Spacing();
 
+        if (usesDlssd)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+                               "DLSS Ray Reconstruction ROI is temporarily unavailable.");
+            ShowHelpMarker("The experimental RR ROI path is disabled while its guide-resource contract is being investigated. "
+                           "Native full-frame Ray Reconstruction remains available.");
+            return;
+        }
+
         bool enabled = config->GazeRoiEnabled.value_or_default();
         if (ImGui::Checkbox("Enable Gaze ROI", &enabled))
             config->GazeRoiEnabled = enabled;
-        ShowHelpMarker("Experimental D3D12 DLSS SR path. Uses a separate ROI DLSS feature and composites it back "
-                       "over a low-cost full-frame upscale.");
+        ShowHelpMarker(usesDlssd
+                           ? "Experimental D3D12 Ray Reconstruction ROI. Runs private zero-based RR in the gaze "
+                             "region and a half-resolution Color + Depth + MV denoiser in the periphery."
+                           : "Experimental D3D12 DLSS SR path. Uses a separate ROI DLSS feature and composites it "
+                             "back over a low-cost full-frame upscale.");
 
         ImGui::BeginDisabled(!enabled);
 
@@ -5664,21 +5685,76 @@ void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
             maxHeightPx = std::max(64, static_cast<int>(ctx.currentFeature->TargetHeight()));
         }
 
-        int widthPx = std::clamp(config->GazeRoiWidthPx.value_or_default(), 64, maxWidthPx);
-        if (ImGui::InputInt("ROI Width", &widthPx, 8, 64))
-            config->GazeRoiWidthPx = std::clamp(widthPx, 64, maxWidthPx);
-        ShowHelpMarker("Target ROI width in output/upscaled pixels. Changing this rebuilds the ROI DLSS feature.");
+        // Keep size edits local to the menu until both dimensions are committed together.
+        // DLSS handle/resource recreation must never observe an intermediate input value.
+        static int pendingWidthPx = -1;
+        static int pendingHeightPx = -1;
+        static int appliedWidthPx = -1;
+        static int appliedHeightPx = -1;
 
-        int heightPx = std::clamp(config->GazeRoiHeightPx.value_or_default(), 64, maxHeightPx);
-        if (ImGui::InputInt("ROI Height", &heightPx, 8, 64))
-            config->GazeRoiHeightPx = std::clamp(heightPx, 64, maxHeightPx);
-        ShowHelpMarker("Target ROI height in output/upscaled pixels. The actual DLSS subrect can shift by a few pixels "
-                       "because input-space ROI dimensions are aligned for DLSS.");
+        const int configuredWidthPx = std::clamp(config->GazeRoiWidthPx.value_or_default(), 64, maxWidthPx);
+        const int configuredHeightPx = std::clamp(config->GazeRoiHeightPx.value_or_default(), 64, maxHeightPx);
+        if (appliedWidthPx != configuredWidthPx || appliedHeightPx != configuredHeightPx)
+        {
+            pendingWidthPx = configuredWidthPx;
+            pendingHeightPx = configuredHeightPx;
+            appliedWidthPx = configuredWidthPx;
+            appliedHeightPx = configuredHeightPx;
+        }
+
+        pendingWidthPx = std::clamp(pendingWidthPx, 64, maxWidthPx);
+        pendingHeightPx = std::clamp(pendingHeightPx, 64, maxHeightPx);
+
+        if (ImGui::InputInt("ROI Width", &pendingWidthPx, 8, 64))
+            pendingWidthPx = std::clamp(pendingWidthPx, 64, maxWidthPx);
+        ShowHelpMarker("Target ROI width in output/upscaled pixels. The value is applied only with the button below.");
+
+        if (ImGui::InputInt("ROI Height", &pendingHeightPx, 8, 64))
+            pendingHeightPx = std::clamp(pendingHeightPx, 64, maxHeightPx);
+        ShowHelpMarker("Target ROI height in output/upscaled pixels. The value is applied only with the button below.");
+
+        const bool roiSizeChanged = pendingWidthPx != configuredWidthPx || pendingHeightPx != configuredHeightPx;
+        ImGui::BeginDisabled(!roiSizeChanged);
+        if (ImGui::Button("Apply ROI Size"))
+        {
+            config->GazeRoiWidthPx = pendingWidthPx;
+            config->GazeRoiHeightPx = pendingHeightPx;
+            appliedWidthPx = pendingWidthPx;
+            appliedHeightPx = pendingHeightPx;
+            LOG_INFO("Applied Gaze ROI size: {}x{}", pendingWidthPx, pendingHeightPx);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled(roiSizeChanged ? "pending" : "applied");
 
         if (ctx.currentFeature != nullptr)
         {
-            const float roiPixels = static_cast<float>(widthPx) * static_cast<float>(heightPx);
+            const float roiPixels = static_cast<float>(pendingWidthPx) * static_cast<float>(pendingHeightPx);
             ImGui::TextDisabled("Target output ROI: %.2f MP", roiPixels / 1000000.0f);
+        }
+
+        if (config->GazeRoiShowAdvancedDebug.value_or_default())
+        {
+            std::string motionVectorMode = config->GazeRoiMotionVectorMode.value_or_default();
+            if (motionVectorMode != "Disabled" && motionVectorMode != "InputDelta" &&
+                motionVectorMode != "InputDeltaReversed" && motionVectorMode != "InputDeltaUnscaled" &&
+                motionVectorMode != "OutputDelta" && motionVectorMode != "OutputDeltaReversed")
+                motionVectorMode = "InputDelta";
+            if (ImGui::BeginCombo("ROI MV Injection", motionVectorMode.c_str()))
+            {
+                constexpr const char* modes[] = {
+                    "Disabled", "InputDelta", "InputDeltaReversed", "InputDeltaUnscaled", "OutputDelta",
+                    "OutputDeltaReversed",
+                };
+                for (const char* mode : modes)
+                {
+                    if (ImGui::Selectable(mode, motionVectorMode == mode))
+                        config->GazeRoiMotionVectorMode = mode;
+                }
+                ImGui::EndCombo();
+            }
+            ShowHelpMarker("Diagnostic variants for the ROI-origin motion-vector correction. InputDelta is the "
+                           "production coordinate identity.");
         }
 
         int feather = config->GazeRoiFeatherPx.value_or_default();
@@ -5687,19 +5763,7 @@ void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Current MVP blends inward from the ROI edge. A later guard-band blend should avoid softening "
                        "the foveal core.");
 
-        bool peripheralBlur = config->GazeRoiPeripheralBlur.value_or_default();
-        if (ImGui::Checkbox("Peripheral Blur", &peripheralBlur))
-            config->GazeRoiPeripheralBlur = peripheralBlur;
-        ShowHelpMarker("Applies a single-frame 9-tap tent blur to the low-cost peripheral upscale. It does not use "
-                       "temporal history.");
-
-        ImGui::BeginDisabled(!peripheralBlur);
-        float peripheralBlurRadius = config->GazeRoiPeripheralBlurRadius.value_or_default();
-        if (ImGui::SliderFloat("Blur Radius", &peripheralBlurRadius, 0.0f, 3.0f, "%.2f"))
-            config->GazeRoiPeripheralBlurRadius = std::clamp(peripheralBlurRadius, 0.0f, 3.0f);
-        ShowHelpMarker("Radius is measured in low-resolution source texels, not output pixels.");
-        ImGui::EndDisabled();
-
+        ImGui::SeparatorText("Subpixel Jitter");
         bool peripheralJitterCancel = config->GazeRoiPeripheralJitterCancel.value_or_default();
         if (ImGui::Checkbox("Peripheral Jitter Cancel", &peripheralJitterCancel))
             config->GazeRoiPeripheralJitterCancel = peripheralJitterCancel;
@@ -5719,55 +5783,176 @@ void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
         }
         ImGui::EndDisabled();
 
-        bool peripheralTemporal = config->GazeRoiPeripheralTemporal.value_or_default();
-        if (ImGui::Checkbox("Peripheral Temporal Stabilizer", &peripheralTemporal))
-            config->GazeRoiPeripheralTemporal = peripheralTemporal;
-        ShowHelpMarker("Low-resolution temporal accumulation for the peripheral image. It uses current-frame "
-                       "neighborhood clipping to reduce shimmer while limiting ghosting.");
+        if (usesDlssd)
+        {
+            ImGui::SeparatorText("Ray Reconstruction Periphery");
+            ImGui::TextDisabled("Half-resolution Color + Depth + MV temporal-spatial denoising");
 
-        ImGui::BeginDisabled(!peripheralTemporal);
-        float temporalCurrentWeight =
-            std::clamp(config->GazeRoiPeripheralTemporalCurrentWeight.value_or_default(), 0.02f, 1.0f);
-        if (ImGui::SliderFloat("Temporal Current Weight", &temporalCurrentWeight, 0.02f, 1.0f, "%.2f"))
-            config->GazeRoiPeripheralTemporalCurrentWeight = std::clamp(temporalCurrentWeight, 0.02f, 1.0f);
-        ShowHelpMarker("Lower values keep more history and reduce shimmer. Higher values follow motion faster.");
+            int spatialPasses = std::clamp(config->DLSSDPeripheralDenoiserSpatialPasses.value_or_default(), 0, 3);
+            if (ImGui::SliderInt("Spatial Passes", &spatialPasses, 0, 3))
+                config->DLSSDPeripheralDenoiserSpatialPasses = spatialPasses;
 
-        float temporalReactiveScale =
-            std::clamp(config->GazeRoiPeripheralTemporalReactiveScale.value_or_default(), 0.0f, 16.0f);
-        if (ImGui::SliderFloat("Temporal Reactive Scale", &temporalReactiveScale, 0.0f, 16.0f, "%.1f"))
-            config->GazeRoiPeripheralTemporalReactiveScale = std::clamp(temporalReactiveScale, 0.0f, 16.0f);
-        ShowHelpMarker("Raises the current-frame weight when current and history differ. Increase it if camera motion "
-                       "leaves peripheral trails.");
-        ImGui::EndDisabled();
+            float spatialRadius =
+                std::clamp(config->DLSSDPeripheralDenoiserSpatialRadius.value_or_default(), 0.5f, 3.0f);
+            if (ImGui::SliderFloat("Spatial Radius", &spatialRadius, 0.5f, 3.0f, "%.2f"))
+                config->DLSSDPeripheralDenoiserSpatialRadius = spatialRadius;
+
+            int maxHistory = std::clamp(config->DLSSDPeripheralDenoiserMaxHistory.value_or_default(), 2, 32);
+            if (ImGui::SliderInt("Temporal History", &maxHistory, 2, 32))
+                config->DLSSDPeripheralDenoiserMaxHistory = maxHistory;
+            ShowHelpMarker("The periphery is deliberately allowed to be soft. More spatial passes and history "
+                           "suppress path-tracing noise more strongly; motion vectors and depth reject invalid history.");
+        }
+        else
+        {
+            ImGui::SeparatorText("DLSS Periphery");
+            bool peripheralBlur = config->GazeRoiPeripheralBlur.value_or_default();
+            if (ImGui::Checkbox("Spatial Blur", &peripheralBlur))
+                config->GazeRoiPeripheralBlur = peripheralBlur;
+            ImGui::BeginDisabled(!peripheralBlur);
+            float peripheralBlurRadius = config->GazeRoiPeripheralBlurRadius.value_or_default();
+            if (ImGui::SliderFloat("Blur Radius", &peripheralBlurRadius, 0.0f, 3.0f, "%.2f"))
+                config->GazeRoiPeripheralBlurRadius = std::clamp(peripheralBlurRadius, 0.0f, 3.0f);
+            ImGui::EndDisabled();
+
+            bool peripheralTemporal = config->GazeRoiPeripheralTemporal.value_or_default();
+            if (ImGui::Checkbox("Temporal Stabilization", &peripheralTemporal))
+                config->GazeRoiPeripheralTemporal = peripheralTemporal;
+            ImGui::BeginDisabled(!peripheralTemporal);
+            float temporalHistoryWeight =
+                std::clamp(config->GazeRoiPeripheralTemporalHistoryWeight.value_or_default(), 0.0f, 1.0f);
+            if (ImGui::SliderFloat("History Retention", &temporalHistoryWeight, 0.0f, 1.0f, "%.2f"))
+                config->GazeRoiPeripheralTemporalHistoryWeight = temporalHistoryWeight;
+            ImGui::EndDisabled();
+            ShowHelpMarker("Fraction of motion/depth-validated previous color retained in the periphery. 0 uses only "
+                           "the current frame; 1 maximizes temporal accumulation. Reactive color changes reduce history.");
+
+            ImGui::BeginDisabled(!peripheralTemporal);
+            float reactiveScale = std::clamp(config->GazeRoiPeripheralTemporalReactiveScale.value_or_default(), 0.0f, 16.0f);
+            if (ImGui::SliderFloat("Change Rejection", &reactiveScale, 0.0f, 4.0f, "%.2f"))
+                config->GazeRoiPeripheralTemporalReactiveScale = reactiveScale;
+            ImGui::EndDisabled();
+            ShowHelpMarker("How strongly a current/history color difference reduces temporal history. 0 tolerates color "
+                           "changes; higher values react faster and reduce trails at the cost of less accumulation.");
+        }
+
+        ImGui::SeparatorText("Inspection");
+        if (usesDlssd)
+        {
+            bool rawColorBypass = config->DLSSDRawColorBypass.value_or_default();
+            if (ImGui::Checkbox("Raw Color Bypass", &rawColorBypass))
+                config->DLSSDRawColorBypass = rawColorBypass;
+            ShowHelpMarker("Skips only the private ROI Ray Reconstruction and point-scales its zero-based raw Color input.");
+
+            bool depthDebugView = config->DLSSDDepthDebugView.value_or_default();
+            if (ImGui::Checkbox("Depth (1:1)", &depthDebugView))
+                config->DLSSDDepthDebugView = depthDebugView;
+            ShowHelpMarker("Displays the current RR depth input point-for-point in the top-left of the active output rect. "
+                           "The original resource and RR depth subrect are used; no copy or scaling is performed.");
+        }
+        else
+        {
+            bool currentColorPointBypass = config->GazeRoiCurrentColorPointBypass.value_or_default();
+            if (ImGui::Checkbox("Current Color Bypass", &currentColorPointBypass))
+                config->GazeRoiCurrentColorPointBypass = currentColorPointBypass;
+            ShowHelpMarker("Skips only private ROI DLSS and point-scales its exact current Color input.");
+        }
+
+        bool motionVectorDebugView = config->GazeRoiMotionVectorDebugView.value_or_default();
+        if (ImGui::Checkbox("Motion Vectors (1:1)", &motionVectorDebugView))
+            config->GazeRoiMotionVectorDebugView = motionVectorDebugView;
+        ShowHelpMarker("Displays the exact cropped and origin-corrected MV resource consumed by the private model in the "
+                       "top-right corner. One MV texel maps to one output pixel; no spatial scaling is applied. "
+                       "Red/green encode signed X/Y motion and blue encodes magnitude, saturating at 32 pixels.");
 
         bool debugBorder = config->GazeRoiDebugBorder.value_or_default();
         if (ImGui::Checkbox("Debug Border", &debugBorder))
             config->GazeRoiDebugBorder = debugBorder;
+        ShowHelpMarker("Draws the active ROI boundary on the final composite.");
+
+        bool showAdvancedDebug = config->GazeRoiShowAdvancedDebug.value_or_default();
+        if (ImGui::Checkbox("Show Advanced Debug", &showAdvancedDebug))
+            config->GazeRoiShowAdvancedDebug = showAdvancedDebug;
+
+        if (showAdvancedDebug)
+        {
+            bool outputClearDebug = config->GazeRoiOutputClearDebug.value_or_default();
+            if (ImGui::Checkbox("Private Output Magenta Pre-Clear", &outputClearDebug))
+                config->GazeRoiOutputClearDebug = outputClearDebug;
+
+            if (usesDlssd)
+            {
+                bool standaloneDenoiser = config->DLSSDPeripheralDenoiser.value_or_default();
+                if (ImGui::Checkbox("Standalone Full-Frame RR Filter Test", &standaloneDenoiser))
+                    config->DLSSDPeripheralDenoiser = standaloneDenoiser;
+                const char* debugViews[] = { "Filtered", "Current", "Reprojected History", "History Rejection", "History Length" };
+                int debugView = std::clamp(config->DLSSDPeripheralDenoiserDebugView.value_or_default(), 0, 4);
+                if (ImGui::Combo("Standalone RR Filter View", &debugView, debugViews, IM_ARRAYSIZE(debugViews)))
+                    config->DLSSDPeripheralDenoiserDebugView = debugView;
+            }
+            else
+            {
+                bool gazeRoiGpuTiming = config->GazeRoiGpuTiming.value_or_default();
+                if (ImGui::Checkbox("GPU Timing", &gazeRoiGpuTiming))
+                    config->GazeRoiGpuTiming = gazeRoiGpuTiming;
+                bool colorCopy = config->GazeRoiColorCopy.value_or_default();
+                if (ImGui::Checkbox("Zero-Based Color Copy", &colorCopy))
+                    config->GazeRoiColorCopy = colorCopy;
+                bool depthCopy = config->GazeRoiDepthCopy.value_or_default();
+                if (ImGui::Checkbox("ROI-local Depth Copy", &depthCopy))
+                    config->GazeRoiDepthCopy = depthCopy;
+                bool omitBias = config->GazeRoiOmitBiasCurrentColorHint.value_or_default();
+                if (ImGui::Checkbox("Omit Bias Current Color Hint", &omitBias))
+                    config->GazeRoiOmitBiasCurrentColorHint = omitBias;
+                bool minimalParameters = config->GazeRoiMinimalPrivateParameters.value_or_default();
+                if (ImGui::Checkbox("Minimal Private NGX Parameters", &minimalParameters))
+                    config->GazeRoiMinimalPrivateParameters = minimalParameters;
+                bool resetOnMove = config->GazeRoiResetOnMove.value_or_default();
+                if (ImGui::Checkbox("Reset History on ROI Move", &resetOnMove))
+                    config->GazeRoiResetOnMove = resetOnMove;
+            }
+        }
 
         std::string control = config->GazeRoiControl.value_or_default();
-        const char* currentControl = control == "Mouse" ? "Mouse" : control == "ExternalUdp" ? "ExternalUdp" : "Keyboard";
+        const char* currentControl = control == "Mouse"                    ? "Mouse"
+                                     : control == "ExternalUdp"            ? "ExternalUdp"
+                                     : control == "ExternalSharedMemory"   ? "ExternalSharedMemory"
+                                                                            : "Keyboard";
         if (ImGui::BeginCombo("Control", currentControl))
         {
             if (ImGui::Selectable("Mouse", control == "Mouse"))
                 config->GazeRoiControl = "Mouse";
             if (ImGui::Selectable("ExternalUdp", control == "ExternalUdp"))
                 config->GazeRoiControl = "ExternalUdp";
-            if (ImGui::Selectable("Keyboard", control != "Mouse" && control != "ExternalUdp"))
+            if (ImGui::Selectable("ExternalSharedMemory", control == "ExternalSharedMemory"))
+                config->GazeRoiControl = "ExternalSharedMemory";
+            if (ImGui::Selectable("Keyboard",
+                                  control != "Mouse" && control != "ExternalUdp" &&
+                                      control != "ExternalSharedMemory"))
                 config->GazeRoiControl = "Keyboard";
             ImGui::EndCombo();
         }
 
-        if (config->GazeRoiControl.value_or_default() == "ExternalUdp")
+        if (config->GazeRoiControl.value_or_default() == "ExternalUdp" ||
+            config->GazeRoiControl.value_or_default() == "ExternalSharedMemory")
         {
-            int udpPort = std::clamp(config->GazeRoiUdpPort.value_or_default(), 1024, 65535);
-            if (ImGui::InputInt("UDP Port", &udpPort, 1, 100))
-                config->GazeRoiUdpPort = std::clamp(udpPort, 1024, 65535);
+            if (config->GazeRoiControl.value_or_default() == "ExternalUdp")
+            {
+                int udpPort = std::clamp(config->GazeRoiUdpPort.value_or_default(), 1024, 65535);
+                if (ImGui::InputInt("UDP Port", &udpPort, 1, 100))
+                    config->GazeRoiUdpPort = std::clamp(udpPort, 1024, 65535);
+            }
 
             int staleMs = std::clamp(config->GazeRoiStaleMs.value_or_default(), 1, 1000);
             if (ImGui::InputInt("Stale", &staleMs, 1, 10))
                 config->GazeRoiStaleMs = std::clamp(staleMs, 1, 1000);
-            ShowHelpMarker("External gaze packets are read from localhost UDP. Stale is the age in milliseconds after "
-                           "which motion-vector history is reset until fresh gaze data arrives.");
+            ShowHelpMarker(config->GazeRoiControl.value_or_default() == "ExternalSharedMemory"
+                               ? "External gaze is read from Local\\EyeTracingGazeV1 shared memory. Stale is the age "
+                                 "after which the last gaze point is frozen until fresh data arrives. Private DLSS "
+                                 "history continues at that fixed ROI."
+                               : "External gaze packets are read from localhost UDP. Stale is the age after which "
+                                 "the last gaze point is frozen until fresh data arrives. Private DLSS history "
+                                 "continues at that fixed ROI.");
         }
 
         ImGui::TextDisabled("Keyboard: F5/F6/F7/F8 move, F9 centers.");

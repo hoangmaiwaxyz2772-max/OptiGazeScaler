@@ -458,6 +458,9 @@
     <ClInclude Include="hooks\Wintrust_Hooks.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="hooks\GazeRoiStreamlineContext.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="hooks\Streamline_Hooks.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -584,7 +587,16 @@
     <ClInclude Include="shaders\depth_invert\precompiled\DI_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="gaze_roi\GazeRoiInput.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="shaders\gaze_roi\GazeRoi_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\ray_reconstruction_debug\RayReconstructionBypass_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\ray_reconstruction_debug\RayReconstructionPeripheralDenoiser_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\Shader_Dx12Utils.h">
@@ -1187,6 +1199,9 @@
     <ClCompile Include="hooks\Streamline_Hooks.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="gaze_roi\GazeRoiInput.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="include\sl.param\parameters.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1263,6 +1278,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="shaders\gaze_roi\GazeRoi_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\ray_reconstruction_debug\RayReconstructionBypass_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\ray_reconstruction_debug\RayReconstructionPeripheralDenoiser_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="hooks\Kernel_Hooks.cpp">

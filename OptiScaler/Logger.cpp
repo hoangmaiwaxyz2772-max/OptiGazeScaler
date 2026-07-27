@@ -11,6 +11,60 @@
 
 #include "Util.h"
 
+static std::filesystem::path FallbackLogPath()
+{
+    wchar_t localAppData[MAX_PATH] {};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+
+    std::filesystem::path basePath;
+    if (length > 0 && length < MAX_PATH)
+        basePath = localAppData;
+    else
+        basePath = std::filesystem::temp_directory_path();
+
+    auto logDir = basePath / L"OptiGazeScaler";
+    std::error_code ec;
+    std::filesystem::create_directories(logDir, ec);
+    return logDir / L"OptiScaler_fallback.log";
+}
+
+static void PrepareFallbackLogger(const char* reason)
+{
+    try
+    {
+        if (spdlog::default_logger() != nullptr)
+            spdlog::default_logger().reset();
+
+        auto fallbackPath = FallbackLogPath();
+        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(fallbackPath, true);
+        file_sink->set_level(spdlog::level::level_enum::trace);
+        file_sink->set_pattern("[%H:%M:%S.%f] [%L] %v");
+
+        auto fallbackLogger = std::make_shared<spdlog::logger>("fallback_file_logger", file_sink);
+        fallbackLogger->set_level(spdlog::level::level_enum::trace);
+        fallbackLogger->flush_on(spdlog::level::trace);
+        spdlog::set_default_logger(fallbackLogger);
+
+        spdlog::error("PrepareLogger failed: {}", reason != nullptr ? reason : "unknown error");
+        spdlog::error("Fallback log path: {}", wstring_to_string(fallbackPath.wstring()));
+        spdlog::error("Configured log path: {}", wstring_to_string(Config::Instance()->LogFileName.value_or_default()));
+        spdlog::error("LogToFile: {}, LogToConsole: {}, LogToDebug: {}, LogToNGX: {}, LogLevel: {}",
+                      Config::Instance()->LogToFile.value_or_default(),
+                      Config::Instance()->LogToConsole.value_or_default(),
+                      Config::Instance()->LogToDebug.value_or_default(),
+                      Config::Instance()->LogToNGX.value_or_default(),
+                      Config::Instance()->LogLevel.value_or_default());
+        spdlog::error("Exe path: {}", wstring_to_string(Util::ExePath().wstring()));
+        spdlog::error("DLL path: {}", wstring_to_string(Util::DllPath().wstring()));
+    }
+    catch (const std::exception& fallbackException)
+    {
+        std::string message = std::string("OptiScaler fallback logger failed: ") + fallbackException.what();
+        OutputDebugStringA(message.c_str());
+        OutputDebugStringA("\n");
+    }
+}
+
 static bool InitializeConsole()
 {
     // Allocate a console for this app
@@ -163,16 +217,19 @@ void PrepareLogger()
             shared_logger->flush_on(spdlog::level::trace);
 
             spdlog::set_default_logger(shared_logger);
+            spdlog::info("Logger initialized. Log file: {}",
+                         wstring_to_string(Config::Instance()->LogFileName.value_or_default()));
         }
     }
     catch (const spdlog::spdlog_ex& ex)
     {
         std::cerr << ex.what() << std::endl;
-
-        auto logger = spdlog::stdout_color_mt("xess");
-        logger->set_pattern("[%H:%M:%S.%f] [%L] %v");
-        logger->set_level((spdlog::level::level_enum) 2);
-        spdlog::set_default_logger(logger);
+        PrepareFallbackLogger(ex.what());
+    }
+    catch (const std::exception& ex)
+    {
+        std::cerr << ex.what() << std::endl;
+        PrepareFallbackLogger(ex.what());
     }
 }
 

@@ -377,7 +377,10 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\depth_invert\DI_Common.h" />
     <ClInclude Include="shaders\depth_invert\DI_Dx12.h" />
     <ClInclude Include="shaders\depth_invert\precompiled\DI_Shader.h" />
+    <ClInclude Include="gaze_roi\GazeRoiInput.h" />
     <ClInclude Include="shaders\gaze_roi\GazeRoi_Dx12.h" />
+    <ClInclude Include="shaders\ray_reconstruction_debug\RayReconstructionBypass_Dx12.h" />
+    <ClInclude Include="shaders\ray_reconstruction_debug\RayReconstructionPeripheralDenoiser_Dx12.h" />
     <ClInclude Include="shaders\depth_transfer\DT_Vk.h" />
     <ClInclude Include="shaders\depth_transfer\precompile\dt_int_Shader_Vk.h" />
     <ClInclude Include="shaders\depth_transfer\precompile\dt_Shader_Vk.h" />
@@ -440,6 +443,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="hooks\Gdi32_Hooks.h" />
     <ClInclude Include="hooks\Kernel_Hooks.h" />
     <ClInclude Include="hooks\Ntdll_Hooks.h" />
+    <ClInclude Include="hooks\GazeRoiStreamlineContext.h" />
     <ClInclude Include="hooks\Streamline_Hooks.h" />
     <ClInclude Include="hooks\Wintrust_Hooks.h" />
     <ClInclude Include="hudfix\Hudfix_Dx12.h" />
@@ -647,6 +651,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     </ClCompile>
     <ClCompile Include="shaders\depth_invert\DI_Dx12.cpp" />
     <ClCompile Include="shaders\gaze_roi\GazeRoi_Dx12.cpp" />
+    <ClCompile Include="shaders\ray_reconstruction_debug\RayReconstructionBypass_Dx12.cpp" />
+    <ClCompile Include="shaders\ray_reconstruction_debug\RayReconstructionPeripheralDenoiser_Dx12.cpp" />
     <ClCompile Include="shaders\hudless_compare_compute\HCC_Dx12.cpp" />
     <ClCompile Include="shaders\hud_copy\HudCopy_Dx12.cpp" />
     <ClCompile Include="shaders\depth_transfer\DT_Vk.cpp" />
@@ -678,6 +684,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="inputs\FG\FSR3_Dx12_FG.cpp" />
     <ClCompile Include="inputs\FG\Streamline_Inputs_Dx12.cpp" />
     <ClCompile Include="framegen\xefg\XeFG_Dx12.cpp" />
+    <ClCompile Include="gaze_roi\GazeRoiInput.cpp" />
     <ClCompile Include="hooks\Streamline_Hooks.cpp" />
     <ClCompile Include="hudfix\Hudfix_Dx12.cpp" />
     <ClCompile Include="include\imgui\imgui_impl_dx11.cpp">

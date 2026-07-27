@@ -686,6 +686,10 @@ void Util::GetDeviceRemovedReason(ID3D11Device* pDevice)
         LOG_ERROR("Device removed reason: DXGI_ERROR_INVALID_CALL");
         break;
 
+    case DXGI_ERROR_ACCESS_DENIED:
+        LOG_ERROR("Device removed reason: DXGI_ERROR_ACCESS_DENIED");
+        break;
+
     case E_OUTOFMEMORY:
         LOG_ERROR("Device removed reason: E_OUTOFMEMORY");
         break;
@@ -719,6 +723,10 @@ void Util::GetDeviceRemovedReason(ID3D12Device* pDevice)
 
     case DXGI_ERROR_INVALID_CALL:
         LOG_ERROR("Device removed reason: DXGI_ERROR_INVALID_CALL");
+        break;
+
+    case DXGI_ERROR_ACCESS_DENIED:
+        LOG_ERROR("Device removed reason: DXGI_ERROR_ACCESS_DENIED");
         break;
 
     case E_OUTOFMEMORY:

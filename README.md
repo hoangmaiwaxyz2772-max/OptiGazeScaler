@@ -11,7 +11,6 @@ The feature is still a research prototype intended for experiments and real-game
 - The current implementation targets **D3D12 + DLSS Super Resolution**.
 - It has been observed to work together with **FSR 3 Frame Generation**.
 - Other upscalers, frame generation methods, and graphics APIs are theoretically possible, but each path needs separate adaptation.
-- It is not suitable for direct use with Ray Reconstruction models: the image before and after ray reconstruction can differ substantially, making local processing harder to match with a cheaper peripheral image.
 
 ## Goal And Potential Benefit
 

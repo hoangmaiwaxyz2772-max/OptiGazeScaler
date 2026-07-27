@@ -464,6 +464,57 @@ bool Shader_Dx12::SetupRootSignature(ID3D12Device* InDevice, uint32_t srcCount, 
     return true;
 }
 
+bool Shader_Dx12::SetupRootSignatureWithConstants(ID3D12Device* InDevice, uint32_t srcCount, uint32_t uavCount,
+                                                   uint32_t constantDwords, uint32_t rtvCount,
+                                                   uint32_t staticSamplerCount,
+                                                   const D3D12_STATIC_SAMPLER_DESC* pStaticSamplers,
+                                                   D3D12_ROOT_SIGNATURE_FLAGS flags)
+{
+    if (_init || InDevice == nullptr || constantDwords == 0)
+        return false;
+
+    _srcCount = srcCount;
+    _uavCount = uavCount;
+    _cbvCount = 0;
+    _rtvCount = rtvCount;
+    _samplerCount = 0;
+    _descriptorRanges.clear();
+
+    if (_srcCount > 0)
+        _descriptorRanges.emplace_back(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, _srcCount, 0);
+    if (_uavCount > 0)
+        _descriptorRanges.emplace_back(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, _uavCount, 0);
+
+    if (_descriptorRanges.empty())
+        return false;
+
+    CD3DX12_ROOT_PARAMETER1 rootParameters[2] {};
+    rootParameters[0].InitAsDescriptorTable(static_cast<UINT>(_descriptorRanges.size()), _descriptorRanges.data());
+    rootParameters[1].InitAsConstants(constantDwords, 0);
+
+    CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSigDesc {};
+    rootSigDesc.Init_1_1(_countof(rootParameters), rootParameters, staticSamplerCount, pStaticSamplers, flags);
+
+    ComPtr<ID3DBlob> errorBlob;
+    ComPtr<ID3DBlob> signatureBlob;
+    HRESULT hr = D3D12SerializeVersionedRootSignature(&rootSigDesc, &signatureBlob, &errorBlob);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("[{0}] D3D12SerializeVersionedRootSignature with constants error {1:x}", _name, hr);
+        return false;
+    }
+
+    hr = InDevice->CreateRootSignature(0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(),
+                                       IID_PPV_ARGS(&_rootSignature));
+    if (FAILED(hr))
+    {
+        LOG_ERROR("[{0}] CreateRootSignature with constants error {1:x}", _name, hr);
+        return false;
+    }
+
+    return true;
+}
+
 bool Shader_Dx12::InitHeaps(ID3D12Device* InDevice, FrameDescriptorHeap* pHeaps, size_t numOFHeaps)
 {
     ScopedSkipHeapCapture skipHeapCapture {};

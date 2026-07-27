@@ -450,6 +450,7 @@ class ResTrack_Dx12
 
   public:
     static void HookDevice(ID3D12Device* device);
+    static void EnsureQueueHook(ID3D12Device* device);
     static void ReleaseHooks();
     static void ReleaseDeviceHooks();
     static void ClearPossibleHudless();

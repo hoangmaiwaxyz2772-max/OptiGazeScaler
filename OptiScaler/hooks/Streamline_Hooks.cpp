@@ -11,10 +11,18 @@
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
 #include <proxies/KernelBase_Proxy.h>
+#include <gaze_roi/GazeRoiInput.h>
+#include <hooks/GazeRoiStreamlineContext.h>
 
 #include <json.hpp>
 #include <sl1_reflex.h>
 #include <magic_enum.hpp>
+#include <algorithm>
+#include <cmath>
+#include <mutex>
+#include <sstream>
+#include <unordered_map>
+#include <vector>
 #include "detours/detours.h"
 
 sl::RenderAPI StreamlineHooks::renderApi = sl::RenderAPI::eCount;
@@ -46,6 +54,7 @@ sl1::pfunLogMessageCallback* StreamlineHooks::o_logCallback_sl1 = nullptr;
 StreamlineHooks::PFN_slGetPluginFunction StreamlineHooks::o_dlss_slGetPluginFunction = nullptr;
 StreamlineHooks::PFN_slOnPluginLoad StreamlineHooks::o_dlss_slOnPluginLoad = nullptr;
 decltype(&slDLSSGetOptimalSettings) StreamlineHooks::o_slDLSSGetOptimalSettings = nullptr;
+decltype(&slDLSSSetOptions) StreamlineHooks::o_slDLSSSetOptions = nullptr;
 
 // DLSSG
 StreamlineHooks::PFN_slGetPluginFunction StreamlineHooks::o_dlssg_slGetPluginFunction = nullptr;
@@ -83,6 +92,357 @@ static bool IsSL1AndDLSSGActive()
 {
     return State::Instance().streamlineVersion.major == 1 && State::Instance().activeFgInput == FGInput::DLSSG &&
            (State::Instance().activeFgOutput == FGOutput::FSRFG || State::Instance().activeFgOutput == FGOutput::XeFG);
+}
+
+static bool IsGazeContractCaptureEnabled()
+{
+    return Config::Instance()->GazeRoiEnabled.value_or_default();
+}
+
+static void LogUniqueGazeStreamlineContract(const char* kind, const std::string& message,
+                                            const std::string& identity = {})
+{
+    static std::mutex logMutex;
+    static std::unordered_map<std::string, std::string> lastSignatures;
+
+    std::scoped_lock lock(logMutex);
+    const auto& dedupeKey = identity.empty() ? message : identity;
+    auto& last = lastSignatures[kind];
+    if (last == dedupeKey)
+        return;
+
+    last = dedupeKey;
+    LOG_INFO("[GROI_SL_CONTRACT] kind={} {}", kind, message);
+}
+
+static void AppendSlMatrix(std::ostringstream& stream, const char* name, const sl::float4x4& matrix)
+{
+    stream << ' ' << name << '=';
+    for (uint32_t row = 0; row < 4; row++)
+    {
+        if (row != 0)
+            stream << ';';
+        const auto& value = matrix[row];
+        stream << value.x << ',' << value.y << ',' << value.z << ',' << value.w;
+    }
+}
+
+static void LogGazeStreamlineConstants(const sl::Constants& values, uint32_t frame, uint32_t viewport)
+{
+    if (!IsGazeContractCaptureEnabled())
+        return;
+
+    std::ostringstream contract;
+    contract << "viewport=" << viewport << " jitter=" << values.jitterOffset.x << ','
+             << values.jitterOffset.y << " mvecScale=" << values.mvecScale.x << ',' << values.mvecScale.y
+             << " pinhole=" << values.cameraPinholeOffset.x << ',' << values.cameraPinholeOffset.y << " cameraPos="
+             << values.cameraPos.x << ',' << values.cameraPos.y << ',' << values.cameraPos.z << " nearFar="
+             << values.cameraNear << ',' << values.cameraFar << " fov=" << values.cameraFOV
+             << " aspect=" << values.cameraAspectRatio << " mvInvalid=" << values.motionVectorsInvalidValue
+             << " depthInverted=" << static_cast<int>(values.depthInverted)
+             << " cameraMotionIncluded=" << static_cast<int>(values.cameraMotionIncluded)
+             << " motionVectors3D=" << static_cast<int>(values.motionVectors3D)
+             << " reset=" << static_cast<int>(values.reset)
+             << " orthographic=" << static_cast<int>(values.orthographicProjection)
+             << " mvDilated=" << static_cast<int>(values.motionVectorsDilated)
+             << " mvJittered=" << static_cast<int>(values.motionVectorsJittered)
+             << " minDepthSeparation=" << values.minRelativeLinearDepthObjectSeparation;
+    AppendSlMatrix(contract, "viewToClip", values.cameraViewToClip);
+    AppendSlMatrix(contract, "clipToView", values.clipToCameraView);
+    AppendSlMatrix(contract, "clipToLens", values.clipToLensClip);
+    AppendSlMatrix(contract, "clipToPrev", values.clipToPrevClip);
+    AppendSlMatrix(contract, "prevToClip", values.prevClipToClip);
+    LogUniqueGazeStreamlineContract("constants", std::format("frame={} {}", frame, contract.str()), contract.str());
+}
+
+static void AppendGazeStreamlineTag(std::ostringstream& contract, const sl::ResourceTag& tag, bool d3d12)
+{
+    const auto typeEnum = static_cast<BufferType>(tag.type);
+    contract << " tag=" << magic_enum::enum_name(typeEnum) << '(' << static_cast<uint64_t>(tag.type) << ')'
+             << ":life" << static_cast<uint32_t>(tag.lifecycle) << ":extent(" << tag.extent.left << ','
+             << tag.extent.top << ',' << tag.extent.width << ',' << tag.extent.height << ')';
+
+    if (tag.resource == nullptr || tag.resource->native == nullptr)
+    {
+        contract << ":null";
+        return;
+    }
+
+    contract << ":native" << tag.resource->native << ":state0x" << std::hex << tag.resource->state << std::dec
+             << ":slDesc(" << tag.resource->width << 'x' << tag.resource->height << ",fmt"
+             << tag.resource->nativeFormat << ",mips" << tag.resource->mipLevels << ",layers"
+             << tag.resource->arrayLayers << ')';
+
+    if (d3d12 && tag.resource->type == sl::ResourceType::eTex2d)
+    {
+        auto* resource = static_cast<ID3D12Resource*>(tag.resource->native);
+        const auto desc = resource->GetDesc();
+        contract << ":d3d12(" << desc.Width << 'x' << desc.Height << ",fmt" << static_cast<uint32_t>(desc.Format)
+                 << ",flags0x" << std::hex << static_cast<uint32_t>(desc.Flags) << std::dec << ",mips"
+                 << desc.MipLevels << ",array" << desc.DepthOrArraySize << ",samples" << desc.SampleDesc.Count << ')';
+    }
+}
+
+static void LogGazeStreamlineTags(const char* kind, uint32_t frame, uint32_t viewport, const sl::ResourceTag* tags,
+                                  uint32_t count, bool d3d12)
+{
+    if (!IsGazeContractCaptureEnabled())
+        return;
+
+    std::ostringstream contract;
+    contract << "viewport=" << viewport << " count=" << count;
+
+    if (tags == nullptr)
+        contract << " removed=true";
+    else
+        for (uint32_t i = 0; i < count; i++)
+            AppendGazeStreamlineTag(contract, tags[i], d3d12);
+
+    std::ostringstream message;
+    message << "frame=";
+    if (frame == UINT_MAX)
+        message << "none";
+    else
+        message << frame;
+    message << ' ' << contract.str();
+
+    LogUniqueGazeStreamlineContract(kind, message.str(), contract.str());
+}
+
+namespace
+{
+constexpr bool kGazeRoiRrTemporarilyDisabled = true;
+
+thread_local GazeRoiStreamlineEvaluationContext currentRrEvaluationContext {};
+
+struct CachedResourceTags
+{
+    std::vector<sl::ResourceTag> tags;
+    std::vector<sl::Resource> resources;
+
+    CachedResourceTags() = default;
+    CachedResourceTags(const CachedResourceTags& other) { Assign(other.tags.data(), static_cast<uint32_t>(other.tags.size())); }
+    CachedResourceTags& operator=(const CachedResourceTags& other)
+    {
+        if (this != &other)
+            Assign(other.tags.data(), static_cast<uint32_t>(other.tags.size()));
+        return *this;
+    }
+    CachedResourceTags(CachedResourceTags&& other) noexcept
+    {
+        Assign(other.tags.data(), static_cast<uint32_t>(other.tags.size()));
+    }
+    CachedResourceTags& operator=(CachedResourceTags&& other) noexcept
+    {
+        Assign(other.tags.data(), static_cast<uint32_t>(other.tags.size()));
+        return *this;
+    }
+
+    void Assign(const sl::ResourceTag* source, uint32_t count)
+    {
+        if (source == nullptr || count == 0)
+        {
+            tags.clear();
+            resources.clear();
+            return;
+        }
+
+        // Build the replacement before releasing the old storage. Merge can
+        // pass tags whose Resource pointers still refer to this cache.
+        std::vector<sl::ResourceTag> newTags;
+        std::vector<sl::Resource> newResources;
+        newTags.reserve(count);
+        newResources.reserve(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            newTags.push_back(source[i]);
+            if (source[i].resource != nullptr)
+            {
+                newResources.push_back(*source[i].resource);
+                newTags.back().resource = &newResources.back();
+            }
+        }
+        tags = std::move(newTags);
+        resources = std::move(newResources);
+    }
+
+    void Merge(const sl::ResourceTag* source, uint32_t count)
+    {
+        if (source == nullptr)
+        {
+            Assign(nullptr, 0);
+            return;
+        }
+        std::vector<sl::ResourceTag> merged = tags;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const auto existing = std::find_if(merged.begin(), merged.end(), [&](const sl::ResourceTag& tag)
+            {
+                return tag.type == source[i].type;
+            });
+            if (existing == merged.end())
+                merged.push_back(source[i]);
+            else
+                *existing = source[i];
+        }
+        Assign(merged.data(), static_cast<uint32_t>(merged.size()));
+    }
+};
+
+std::mutex resourceTagCacheMutex;
+std::unordered_map<uint32_t, CachedResourceTags> staticResourceTags;
+std::unordered_map<uint64_t, CachedResourceTags> frameResourceTags;
+
+uint64_t MakeFrameViewportKey(uint32_t frame, uint32_t viewport)
+{
+    return (static_cast<uint64_t>(frame) << 32U) | viewport;
+}
+
+uint32_t FindViewport(const sl::BaseStructure** inputs, uint32_t numInputs)
+{
+    for (uint32_t i = 0; inputs != nullptr && i < numInputs; ++i)
+    {
+        if (inputs[i] != nullptr && inputs[i]->structType == sl::ViewportHandle::s_structType)
+            return static_cast<uint32_t>(*static_cast<const sl::ViewportHandle*>(inputs[i]));
+    }
+    return UINT_MAX;
+}
+
+sl::Extent ResolveTagExtent(const sl::ResourceTag& tag)
+{
+    if (tag.extent)
+        return tag.extent;
+    if (tag.resource == nullptr || tag.resource->native == nullptr)
+        return {};
+
+    uint32_t width = tag.resource->width;
+    uint32_t height = tag.resource->height;
+    if ((width == 0 || height == 0) && tag.resource->type == sl::ResourceType::eTex2d)
+    {
+        const auto desc = static_cast<ID3D12Resource*>(tag.resource->native)->GetDesc();
+        width = static_cast<uint32_t>(std::min<uint64_t>(desc.Width, UINT32_MAX));
+        height = desc.Height;
+    }
+    return { 0, 0, width, height };
+}
+
+GazeRoiStreamlineRect ToContextRect(const sl::Extent& extent)
+{
+    return { extent.left, extent.top, extent.width, extent.height };
+}
+
+sl::Extent MapNormalizedRoi(const sl::Extent& extent, double left, double top, double width, double height)
+{
+    if (!extent)
+        return {};
+    const uint32_t mappedWidth = std::clamp<uint32_t>(
+        static_cast<uint32_t>(std::llround(width * extent.width)), 1U, extent.width);
+    const uint32_t mappedHeight = std::clamp<uint32_t>(
+        static_cast<uint32_t>(std::llround(height * extent.height)), 1U, extent.height);
+    const uint32_t maxLeft = extent.width - mappedWidth;
+    const uint32_t maxTop = extent.height - mappedHeight;
+    const uint32_t mappedLeft = static_cast<uint32_t>(std::clamp<int64_t>(
+        static_cast<int64_t>(std::llround(left * extent.width)), 0, maxLeft));
+    const uint32_t mappedTop = static_cast<uint32_t>(std::clamp<int64_t>(
+        static_cast<int64_t>(std::llround(top * extent.height)), 0, maxTop));
+    return { extent.top + mappedTop, extent.left + mappedLeft, mappedWidth, mappedHeight };
+}
+
+bool BuildLocalizedRrTags(const CachedResourceTags& original, const GazeRoiInputSample& gaze,
+                          CachedResourceTags& localized, GazeRoiStreamlineEvaluationContext& context)
+{
+    const auto output = std::find_if(original.tags.begin(), original.tags.end(), [](const sl::ResourceTag& tag)
+    {
+        return tag.type == sl::kBufferTypeScalingOutputColor && tag.resource != nullptr &&
+               tag.resource->native != nullptr;
+    });
+    if (output == original.tags.end())
+        return false;
+
+    const sl::Extent outputExtent = ResolveTagExtent(*output);
+    if (!outputExtent)
+        return false;
+
+    const uint32_t outputWidth = std::clamp<uint32_t>(
+        Config::Instance()->GazeRoiWidthPx.value_or_default(), std::min(64U, outputExtent.width), outputExtent.width);
+    const uint32_t outputHeight = std::clamp<uint32_t>(
+        Config::Instance()->GazeRoiHeightPx.value_or_default(), std::min(64U, outputExtent.height), outputExtent.height);
+    const uint32_t outputLeft = static_cast<uint32_t>(std::clamp<int64_t>(
+        static_cast<int64_t>(std::lround(gaze.x * outputExtent.width)) - outputWidth / 2U,
+        0, outputExtent.width - outputWidth));
+    const uint32_t outputTop = static_cast<uint32_t>(std::clamp<int64_t>(
+        static_cast<int64_t>(std::lround(gaze.y * outputExtent.height)) - outputHeight / 2U,
+        0, outputExtent.height - outputHeight));
+    const double normalizedLeft = static_cast<double>(outputLeft) / outputExtent.width;
+    const double normalizedTop = static_cast<double>(outputTop) / outputExtent.height;
+    const double normalizedWidth = static_cast<double>(outputWidth) / outputExtent.width;
+    const double normalizedHeight = static_cast<double>(outputHeight) / outputExtent.height;
+
+    localized = original;
+    context = {};
+    context.active = true;
+    context.recentered = gaze.recentered;
+    context.gazeX = gaze.x;
+    context.gazeY = gaze.y;
+
+    for (auto& tag : localized.tags)
+    {
+        const sl::Extent originalExtent = ResolveTagExtent(tag);
+        if (!originalExtent)
+            continue;
+        const sl::Extent localExtent = MapNormalizedRoi(
+            originalExtent, normalizedLeft, normalizedTop, normalizedWidth, normalizedHeight);
+        tag.extent = localExtent;
+
+        GazeRoiStreamlineRect* originalRect = nullptr;
+        GazeRoiStreamlineRect* localRect = nullptr;
+        if (tag.type == sl::kBufferTypeScalingInputColor)
+        {
+            originalRect = &context.colorOriginal;
+            localRect = &context.colorLocal;
+        }
+        else if (tag.type == sl::kBufferTypeDepth ||
+                 ((tag.type == sl::kBufferTypeLinearDepth || tag.type == sl::kBufferTypeHiResDepth) &&
+                  context.depthOriginal.width == 0))
+        {
+            originalRect = &context.depthOriginal;
+            localRect = &context.depthLocal;
+        }
+        else if (tag.type == sl::kBufferTypeMotionVectors)
+        {
+            originalRect = &context.motionVectorsOriginal;
+            localRect = &context.motionVectorsLocal;
+        }
+        else if (tag.type == sl::kBufferTypeScalingOutputColor)
+        {
+            originalRect = &context.outputOriginal;
+            localRect = &context.outputLocal;
+        }
+        if (originalRect != nullptr)
+        {
+            *originalRect = ToContextRect(originalExtent);
+            *localRect = ToContextRect(localExtent);
+        }
+    }
+
+    return context.colorLocal.width != 0 && context.depthLocal.width != 0 &&
+           context.motionVectorsLocal.width != 0 && context.outputLocal.width != 0;
+}
+} // namespace
+
+const GazeRoiStreamlineEvaluationContext* GazeRoiStreamlineContext::Current()
+{
+    return currentRrEvaluationContext.active ? &currentRrEvaluationContext : nullptr;
+}
+
+void GazeRoiStreamlineContext::Set(const GazeRoiStreamlineEvaluationContext& context)
+{
+    currentRrEvaluationContext = context;
+}
+
+void GazeRoiStreamlineContext::Clear()
+{
+    currentRrEvaluationContext = {};
 }
 
 static bool IsSL1AndFGActive()
@@ -223,6 +583,9 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
 sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const sl::ResourceTag* tags,
                                        uint32_t numTags, sl::CommandBuffer* cmdBuffer)
 {
+    LogGazeStreamlineTags("tags", UINT_MAX, static_cast<uint32_t>(viewport), tags, numTags,
+                          renderApi == sl::RenderAPI::eD3D12);
+
     if (renderApi == sl::RenderAPI::eD3D11 || renderApi == sl::RenderAPI::eVulkan)
     {
         LOG_ERROR("hkslSetTag only supports DX12");
@@ -232,11 +595,20 @@ sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const
     if (renderApi == sl::RenderAPI::eCount)
         LOG_WARN("Incomplete Streamline hooks");
 
+    {
+        std::lock_guard lock(resourceTagCacheMutex);
+        if (tags == nullptr)
+            staticResourceTags.erase(static_cast<uint32_t>(viewport));
+    }
+
     if (tags == nullptr)
     {
         LOG_WARN("Game trying to remove a tag");
         return o_slSetTag(viewport, tags, numTags, cmdBuffer);
     }
+
+    const bool fgTagBehaviorEnabled = State::Instance().activeFgInput == FGInput::NvngxFG ||
+                                      State::Instance().activeFgInput == FGInput::DLSSG;
 
     for (uint32_t i = 0; i < numTags; i++)
     {
@@ -249,7 +621,7 @@ sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const
         }
 
         // Cyberpunk hudless state fix for RDNA 2
-        if (State::Instance().gameQuirks & GameQuirk::CyberpunkHudlessState &&
+        if (fgTagBehaviorEnabled && State::Instance().gameQuirks & GameQuirk::CyberpunkHudlessState &&
             tags[i].resource->state ==
                 (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) &&
             tags[i].type == sl::kBufferTypeHUDLessColor)
@@ -278,6 +650,11 @@ sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const
         }
     }
 
+    {
+        std::lock_guard lock(resourceTagCacheMutex);
+        staticResourceTags[static_cast<uint32_t>(viewport)].Merge(tags, numTags);
+    }
+
     auto result = o_slSetTag(viewport, tags, numTags, cmdBuffer);
     return result;
 }
@@ -286,6 +663,9 @@ sl::Result StreamlineHooks::hkslSetTagForFrame(const sl::FrameToken& frame, cons
                                                const sl::ResourceTag* resources, uint32_t numResources,
                                                sl::CommandBuffer* cmdBuffer)
 {
+    LogGazeStreamlineTags("frameTags", static_cast<uint32_t>(frame), static_cast<uint32_t>(viewport), resources,
+                          numResources, renderApi == sl::RenderAPI::eD3D12);
+
     if (renderApi == sl::RenderAPI::eD3D11 || renderApi == sl::RenderAPI::eVulkan)
     {
         LOG_ERROR("hkslSetTagForFrame only supports DX12");
@@ -294,6 +674,23 @@ sl::Result StreamlineHooks::hkslSetTagForFrame(const sl::FrameToken& frame, cons
 
     if (renderApi == sl::RenderAPI::eCount)
         LOG_WARN("Incomplete Streamline hooks");
+
+    const uint32_t frameIndex = static_cast<uint32_t>(frame);
+    const uint32_t viewportIndex = static_cast<uint32_t>(viewport);
+    {
+        std::lock_guard lock(resourceTagCacheMutex);
+        const uint64_t key = MakeFrameViewportKey(frameIndex, viewportIndex);
+        if (resources == nullptr)
+            frameResourceTags.erase(key);
+        for (auto iterator = frameResourceTags.begin(); iterator != frameResourceTags.end();)
+        {
+            const uint32_t cachedFrame = static_cast<uint32_t>(iterator->first >> 32U);
+            if (cachedFrame + 8U < frameIndex)
+                iterator = frameResourceTags.erase(iterator);
+            else
+                ++iterator;
+        }
+    }
 
     if (resources == nullptr)
     {
@@ -335,15 +732,63 @@ sl::Result StreamlineHooks::hkslSetTagForFrame(const sl::FrameToken& frame, cons
         }
     }
 
+    {
+        std::lock_guard lock(resourceTagCacheMutex);
+        frameResourceTags[MakeFrameViewportKey(frameIndex, viewportIndex)].Merge(resources, numResources);
+    }
+
     auto result = o_slSetTagForFrame(frame, viewport, resources, numResources, cmdBuffer);
     return result;
 }
 
 sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::FrameToken& frame,
-                                                const sl::BaseStructure** inputs, uint32_t numInputs,
-                                                sl::CommandBuffer* cmdBuffer)
+                                                 const sl::BaseStructure** inputs, uint32_t numInputs,
+                                                 sl::CommandBuffer* cmdBuffer)
 {
-    LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));
+    const uint32_t frameIndex = static_cast<uint32_t>(frame);
+    const uint32_t viewport = FindViewport(inputs, numInputs);
+    LOG_DEBUG("frameIndex: {}", frameIndex);
+
+    if (IsGazeContractCaptureEnabled())
+    {
+        std::ostringstream contract;
+        contract << "feature=" << static_cast<uint32_t>(feature) << " viewport=" << viewport << " inputs="
+                 << numInputs;
+        for (uint32_t i = 0; inputs != nullptr && i < numInputs; i++)
+        {
+            if (inputs[i] == nullptr)
+            {
+                contract << " input" << i << "=null";
+                continue;
+            }
+
+            if (inputs[i]->structType == sl::ViewportHandle::s_structType)
+            {
+                contract << " viewportInput=true";
+            }
+            else if (inputs[i]->structType == sl::ResourceTag::s_structType)
+            {
+                AppendGazeStreamlineTag(contract, *static_cast<const sl::ResourceTag*>(inputs[i]),
+                                        renderApi == sl::RenderAPI::eD3D12);
+            }
+            else if (inputs[i]->structType == sl::Constants::s_structType)
+            {
+                contract << " constants=true";
+                LogGazeStreamlineConstants(*static_cast<const sl::Constants*>(inputs[i]),
+                                           frameIndex, viewport);
+            }
+            else if (inputs[i]->structType == sl::DLSSOptions::s_structType)
+            {
+                contract << " dlssOptions=true";
+            }
+            else
+            {
+                contract << " input" << i << "Version=" << inputs[i]->structVersion;
+            }
+        }
+        LogUniqueGazeStreamlineContract(
+            "evaluate", std::format("frame={} {}", frameIndex, contract.str()), contract.str());
+    }
 
     if (State::Instance().activeFgInput == FGInput::DLSSG && numInputs > 0 && inputs != nullptr)
     {
@@ -362,13 +807,111 @@ sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::F
                     tag->type == sl::kBufferTypeBidirectionalDistortionField)
                 {
                     State::Instance().slFGInputs.reportResource(*tag, (ID3D12GraphicsCommandList*) cmdBuffer,
-                                                                (uint32_t) frame);
+                                                                frameIndex);
                 }
             }
         }
     }
 
-    auto result = o_slEvaluateFeature(feature, frame, inputs, numInputs, cmdBuffer);
+    const bool localizeRr = !kGazeRoiRrTemporarilyDisabled && feature == sl::kFeatureDLSS_RR && renderApi == sl::RenderAPI::eD3D12 &&
+                            Config::Instance()->GazeRoiEnabled.value_or_default() && viewport != UINT_MAX;
+    if (!localizeRr)
+        return o_slEvaluateFeature(feature, frame, inputs, numInputs, cmdBuffer);
+
+    CachedResourceTags originalTags;
+    bool frameBasedTags = false;
+    uint32_t staticTagCount = 0;
+    uint32_t frameTagCount = 0;
+    uint32_t inlineTagCount = 0;
+    {
+        std::lock_guard lock(resourceTagCacheMutex);
+        const auto staticTags = staticResourceTags.find(viewport);
+        if (staticTags != staticResourceTags.end())
+        {
+            originalTags = staticTags->second;
+            staticTagCount = static_cast<uint32_t>(staticTags->second.tags.size());
+        }
+
+        const auto frameTags = frameResourceTags.find(MakeFrameViewportKey(frameIndex, viewport));
+        if (frameTags != frameResourceTags.end())
+        {
+            originalTags.Merge(frameTags->second.tags.data(),
+                               static_cast<uint32_t>(frameTags->second.tags.size()));
+            frameBasedTags = true;
+            frameTagCount = static_cast<uint32_t>(frameTags->second.tags.size());
+        }
+    }
+    for (uint32_t i = 0; inputs != nullptr && i < numInputs; ++i)
+    {
+        if (inputs[i] != nullptr && inputs[i]->structType == sl::ResourceTag::s_structType)
+        {
+            originalTags.Merge(static_cast<const sl::ResourceTag*>(inputs[i]), 1);
+            ++inlineTagCount;
+        }
+    }
+
+    CachedResourceTags localizedTags;
+    GazeRoiStreamlineEvaluationContext evaluationContext {};
+    const GazeRoiInputSample gaze = GazeRoiInput::Sample();
+    if (!BuildLocalizedRrTags(originalTags, gaze, localizedTags, evaluationContext))
+    {
+        LOG_ERROR("[GROI_SL_RR] frame={} viewport={} missing Color, Depth, MV, Output tag contract; RR ROI skipped",
+                  frameIndex, viewport);
+        return o_slEvaluateFeature(feature, frame, inputs, numInputs, cmdBuffer);
+    }
+
+    std::vector<const sl::BaseStructure*> localizedInputs;
+    std::vector<sl::ResourceTag> localizedInlineTags;
+    if (inputs != nullptr && numInputs != 0)
+    {
+        localizedInputs.assign(inputs, inputs + numInputs);
+        localizedInlineTags.reserve(numInputs);
+        for (uint32_t i = 0; i < numInputs; ++i)
+        {
+            if (inputs[i] == nullptr || inputs[i]->structType != sl::ResourceTag::s_structType)
+                continue;
+            localizedInlineTags.push_back(*static_cast<const sl::ResourceTag*>(inputs[i]));
+            const auto localized = std::find_if(
+                localizedTags.tags.begin(), localizedTags.tags.end(), [&](const sl::ResourceTag& tag)
+                {
+                    return tag.type == localizedInlineTags.back().type;
+                });
+            if (localized != localizedTags.tags.end())
+                localizedInlineTags.back().extent = localized->extent;
+            localizedInputs[i] = &localizedInlineTags.back();
+        }
+    }
+
+    const sl::ViewportHandle viewportHandle(viewport);
+    const auto registerTags = [&](const CachedResourceTags& tags)
+    {
+        if (frameBasedTags)
+            return o_slSetTagForFrame(frame, viewportHandle, tags.tags.data(),
+                                      static_cast<uint32_t>(tags.tags.size()), cmdBuffer);
+        return o_slSetTag(viewportHandle, tags.tags.data(), static_cast<uint32_t>(tags.tags.size()), cmdBuffer);
+    };
+
+    const sl::Result localizedTagResult = registerTags(localizedTags);
+    if (localizedTagResult != sl::Result::eOk)
+    {
+        registerTags(originalTags);
+        LOG_ERROR("[GROI_SL_RR] frame={} viewport={} localized tag registration failed result={}",
+                  frameIndex, viewport, static_cast<uint32_t>(localizedTagResult));
+        return o_slEvaluateFeature(feature, frame, inputs, numInputs, cmdBuffer);
+    }
+
+    LogGazeStreamlineTags("rrLocalizedTags", frameIndex, viewport, localizedTags.tags.data(),
+                          static_cast<uint32_t>(localizedTags.tags.size()), true);
+    LOG_DEBUG("[GROI_SL_RR] frame={} viewport={} localized {} tags sources static={} frame={} inline={}",
+              frameIndex, viewport, localizedTags.tags.size(), staticTagCount, frameTagCount, inlineTagCount);
+    GazeRoiStreamlineContext::Set(evaluationContext);
+    const sl::Result result = o_slEvaluateFeature(
+        feature, frame, localizedInputs.empty() ? inputs : localizedInputs.data(), numInputs, cmdBuffer);
+    GazeRoiStreamlineContext::Clear();
+    const sl::Result restoreResult = registerTags(originalTags);
+    if (restoreResult != sl::Result::eOk)
+        LOG_ERROR("[GROI_SL_RR] frame={} viewport={} original tag restore failed result={}",
+                  frameIndex, viewport, static_cast<uint32_t>(restoreResult));
     return result;
 }
 
@@ -855,14 +1398,43 @@ bool StreamlineHooks::hklocal_dlssg_slOnPluginLoad(sl::param::IParameters* param
 }
 
 sl::Result StreamlineHooks::hkslSetConstants(const sl::Constants& values, const sl::FrameToken& frame,
-                                             const sl::ViewportHandle& viewport)
+                                              const sl::ViewportHandle& viewport)
 {
     std::scoped_lock lock(setConstantsMutex);
     LOG_TRACE("called with frameIndex: {}, viewport: {}", (unsigned int) frame, (unsigned int) viewport);
 
-    State::Instance().slFGInputs.setConstants(values, (uint32_t) frame);
+    LogGazeStreamlineConstants(values, static_cast<uint32_t>(frame), static_cast<uint32_t>(viewport));
+
+    if (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgInput == FGInput::NvngxFG)
+        State::Instance().slFGInputs.setConstants(values, (uint32_t) frame);
 
     return o_slSetConstants(values, frame, viewport);
+}
+
+sl::Result StreamlineHooks::hkslDLSSSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSOptions& options)
+{
+    if (IsGazeContractCaptureEnabled())
+    {
+        std::ostringstream contract;
+        contract << "viewport=" << static_cast<uint32_t>(viewport) << " mode=" << static_cast<uint32_t>(options.mode)
+                 << " output=" << options.outputWidth << 'x' << options.outputHeight
+                 << " sharpness=" << options.sharpness << " preExposure=" << options.preExposure
+                 << " exposureScale=" << options.exposureScale
+                 << " colorHDR=" << static_cast<int>(options.colorBuffersHDR)
+                 << " invertX=" << static_cast<int>(options.indicatorInvertAxisX)
+                 << " invertY=" << static_cast<int>(options.indicatorInvertAxisY)
+                 << " presets=" << static_cast<uint32_t>(options.dlaaPreset) << ','
+                 << static_cast<uint32_t>(options.qualityPreset) << ','
+                 << static_cast<uint32_t>(options.balancedPreset) << ','
+                 << static_cast<uint32_t>(options.performancePreset) << ','
+                 << static_cast<uint32_t>(options.ultraPerformancePreset) << ','
+                 << static_cast<uint32_t>(options.ultraQualityPreset)
+                 << " autoExposure=" << static_cast<int>(options.useAutoExposure)
+                 << " alphaUpscaling=" << static_cast<int>(options.alphaUpscalingEnabled);
+        LogUniqueGazeStreamlineContract("dlssOptions", contract.str());
+    }
+
+    return o_slDLSSSetOptions(viewport, options);
 }
 
 bool StreamlineHooks::hkcommon_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON,
@@ -1192,6 +1764,12 @@ void* StreamlineHooks::hkdlss_slGetPluginFunction(const char* functionName)
     {
         o_slDLSSGetOptimalSettings = (decltype(&slDLSSGetOptimalSettings)) o_dlss_slGetPluginFunction(functionName);
         return &hkslDLSSGetOptimalSettings;
+    }
+
+    if (strcmp(functionName, "slDLSSSetOptions") == 0 && IsGazeContractCaptureEnabled())
+    {
+        o_slDLSSSetOptions = (decltype(&slDLSSSetOptions)) o_dlss_slGetPluginFunction(functionName);
+        return o_slDLSSSetOptions != nullptr ? &hkslDLSSSetOptions : nullptr;
     }
 
     return o_dlss_slGetPluginFunction(functionName);
@@ -1677,7 +2255,8 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                 DetourAttach(&(PVOID&) o_slInit, hkslInit);
 
                 bool hookSetTag = (State::Instance().activeFgInput == FGInput::NvngxFG ||
-                                   State::Instance().activeFgInput == FGInput::DLSSG);
+                                   State::Instance().activeFgInput == FGInput::DLSSG ||
+                                   IsGazeContractCaptureEnabled());
 
                 if (o_slSetTag != nullptr && hookSetTag)
                     DetourAttach(&(PVOID&) o_slSetTag, hkslSetTag);

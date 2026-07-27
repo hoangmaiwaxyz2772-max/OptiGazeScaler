@@ -359,6 +359,16 @@ bool Config::Reload(std::filesystem::path iniPath)
                 GazeRoiPeripheralJitterSign.set_from_config(setting.value() < 0 ? -1 : 1);
 
             GazeRoiPeripheralTemporal.set_from_config(readBool("GazeRoi", "PeripheralTemporal"));
+            GazeRoiPeripheralTemporalMotionReprojection.set_from_config(
+                readBool("GazeRoi", "PeripheralTemporalMotionReprojection"));
+            // Keep the former key readable so existing profiles retain their value;
+            // newly written profiles use the explicit history-retention name.
+            auto historyWeight = readFloat("GazeRoi", "PeripheralTemporalHistoryWeight");
+            if (!historyWeight.has_value())
+                historyWeight = readFloat("GazeRoi", "PeripheralTemporalStrength");
+            if (historyWeight.has_value())
+                GazeRoiPeripheralTemporalHistoryWeight.set_from_config(
+                    std::clamp(historyWeight.value(), 0.0f, 1.0f));
 
             if (auto setting = readFloat("GazeRoi", "PeripheralTemporalCurrentWeight"); setting.has_value())
                 GazeRoiPeripheralTemporalCurrentWeight.set_from_config(std::clamp(setting.value(), 0.02f, 1.0f));
@@ -367,11 +377,41 @@ bool Config::Reload(std::filesystem::path iniPath)
                 GazeRoiPeripheralTemporalReactiveScale.set_from_config(std::clamp(setting.value(), 0.0f, 16.0f));
 
             GazeRoiDebugBorder.set_from_config(readBool("GazeRoi", "DebugBorder"));
+            GazeRoiMotionVectorDebugView.set_from_config(readBool("GazeRoi", "MotionVectorDebugView"));
+            GazeRoiOutputClearDebug.set_from_config(readBool("GazeRoi", "OutputClearDebug"));
+            GazeRoiCurrentColorPointBypass.set_from_config(readBool("GazeRoi", "CurrentColorPointBypass"));
+            GazeRoiColorCopy.set_from_config(readBool("GazeRoi", "ColorCopy"));
+            GazeRoiDepthCopy.set_from_config(readBool("GazeRoi", "DepthCopy"));
+            GazeRoiOmitBiasCurrentColorHint.set_from_config(readBool("GazeRoi", "OmitBiasCurrentColorHint"));
+            GazeRoiMinimalPrivateParameters.set_from_config(readBool("GazeRoi", "MinimalPrivateParameters"));
+            GazeRoiResetOnMove.set_from_config(readBool("GazeRoi", "ResetOnMove"));
+            GazeRoiGpuTiming.set_from_config(readBool("GazeRoi", "GpuTiming"));
+            GazeRoiShowAdvancedDebug.set_from_config(readBool("GazeRoi", "ShowAdvancedDebug"));
+
+            if (auto setting = readString("GazeRoi", "MotionVectorMode", true); setting.has_value())
+            {
+                if (setting.value() == "disabled" || setting.value() == "off" || setting.value() == "none")
+                    GazeRoiMotionVectorMode.set_from_config("Disabled");
+                else if (setting.value() == "inputdelta")
+                    GazeRoiMotionVectorMode.set_from_config("InputDelta");
+                else if (setting.value() == "inputdeltareversed" || setting.value() == "inputdeltareverse")
+                    GazeRoiMotionVectorMode.set_from_config("InputDeltaReversed");
+                else if (setting.value() == "inputdeltaunscaled" || setting.value() == "inputdeltaraw")
+                    GazeRoiMotionVectorMode.set_from_config("InputDeltaUnscaled");
+                else if (setting.value() == "outputdelta")
+                    GazeRoiMotionVectorMode.set_from_config("OutputDelta");
+                else if (setting.value() == "outputdeltareversed" || setting.value() == "outputdeltareverse")
+                    GazeRoiMotionVectorMode.set_from_config("OutputDeltaReversed");
+                else
+                    GazeRoiMotionVectorMode.set_from_config("InputDelta");
+            }
 
             if (auto setting = readString("GazeRoi", "Control", true); setting.has_value())
             {
                 if (setting.value() == "mouse")
                     GazeRoiControl.set_from_config("Mouse");
+                else if (setting.value() == "externalsharedmemory" || setting.value() == "sharedmemory")
+                    GazeRoiControl.set_from_config("ExternalSharedMemory");
                 else if (setting.value() == "externaludp")
                     GazeRoiControl.set_from_config("ExternalUdp");
                 else
@@ -387,6 +427,18 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // DLSSD
         {
+            DLSSDRawColorBypass.set_from_config(readBool("DLSSD", "RawColorBypass"));
+            DLSSDDepthDebugView.set_from_config(readBool("DLSSD", "DepthDebugView"));
+            DLSSDPeripheralDenoiser.set_from_config(readBool("DLSSD", "PeripheralDenoiser"));
+            if (auto setting = readInt("DLSSD", "PeripheralDenoiserDebugView"); setting.has_value())
+                DLSSDPeripheralDenoiserDebugView.set_from_config(std::clamp(setting.value(), 0, 4));
+            if (auto setting = readInt("DLSSD", "PeripheralDenoiserSpatialPasses"); setting.has_value())
+                DLSSDPeripheralDenoiserSpatialPasses.set_from_config(std::clamp(setting.value(), 0, 3));
+            if (auto setting = readFloat("DLSSD", "PeripheralDenoiserSpatialRadius"); setting.has_value())
+                DLSSDPeripheralDenoiserSpatialRadius.set_from_config(std::clamp(setting.value(), 0.5f, 3.0f));
+            if (auto setting = readInt("DLSSD", "PeripheralDenoiserMaxHistory"); setting.has_value())
+                DLSSDPeripheralDenoiserMaxHistory.set_from_config(std::clamp(setting.value(), 2, 32));
+
             // Don't enable again if set false because of no nvngx found
             DLSSDRenderPresetOverride.set_from_config(readBool("DLSSD", "RenderPresetOverride"));
 
@@ -1191,12 +1243,38 @@ bool Config::SaveIni()
                      GetIntValue(Instance()->GazeRoiPeripheralJitterSign.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "PeripheralTemporal",
                      GetBoolValue(Instance()->GazeRoiPeripheralTemporal.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralTemporalMotionReprojection",
+                     GetBoolValue(Instance()->GazeRoiPeripheralTemporalMotionReprojection.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralTemporalHistoryWeight",
+                     GetFloatValue(Instance()->GazeRoiPeripheralTemporalHistoryWeight.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "PeripheralTemporalCurrentWeight",
                      GetFloatValue(Instance()->GazeRoiPeripheralTemporalCurrentWeight.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "PeripheralTemporalReactiveScale",
                      GetFloatValue(Instance()->GazeRoiPeripheralTemporalReactiveScale.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "DebugBorder",
                      GetBoolValue(Instance()->GazeRoiDebugBorder.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "MotionVectorDebugView",
+                     GetBoolValue(Instance()->GazeRoiMotionVectorDebugView.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "OutputClearDebug",
+                     GetBoolValue(Instance()->GazeRoiOutputClearDebug.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "CurrentColorPointBypass",
+                     GetBoolValue(Instance()->GazeRoiCurrentColorPointBypass.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "ColorCopy",
+                     GetBoolValue(Instance()->GazeRoiColorCopy.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "DepthCopy",
+                     GetBoolValue(Instance()->GazeRoiDepthCopy.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "OmitBiasCurrentColorHint",
+                     GetBoolValue(Instance()->GazeRoiOmitBiasCurrentColorHint.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "MinimalPrivateParameters",
+                     GetBoolValue(Instance()->GazeRoiMinimalPrivateParameters.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "ResetOnMove",
+                     GetBoolValue(Instance()->GazeRoiResetOnMove.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "GpuTiming",
+                     GetBoolValue(Instance()->GazeRoiGpuTiming.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "ShowAdvancedDebug",
+                     GetBoolValue(Instance()->GazeRoiShowAdvancedDebug.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "MotionVectorMode",
+                     Instance()->GazeRoiMotionVectorMode.value_for_config().value_or("InputDelta").c_str());
         ini.SetValue("GazeRoi", "Control", Instance()->GazeRoiControl.value_for_config().value_or("Keyboard").c_str());
         ini.SetValue("GazeRoi", "UdpPort", GetIntValue(Instance()->GazeRoiUdpPort.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "StaleMs", GetIntValue(Instance()->GazeRoiStaleMs.value_for_config()).c_str());
@@ -1204,6 +1282,20 @@ bool Config::SaveIni()
 
     // DLSSD
     {
+        ini.SetValue("DLSSD", "RawColorBypass",
+                     GetBoolValue(Instance()->DLSSDRawColorBypass.value_for_config()).c_str());
+        ini.SetValue("DLSSD", "DepthDebugView",
+                     GetBoolValue(Instance()->DLSSDDepthDebugView.value_for_config()).c_str());
+        ini.SetValue("DLSSD", "PeripheralDenoiser",
+                     GetBoolValue(Instance()->DLSSDPeripheralDenoiser.value_for_config()).c_str());
+        ini.SetValue("DLSSD", "PeripheralDenoiserDebugView",
+                     GetIntValue(Instance()->DLSSDPeripheralDenoiserDebugView.value_for_config()).c_str());
+        ini.SetValue("DLSSD", "PeripheralDenoiserSpatialPasses",
+                     GetIntValue(Instance()->DLSSDPeripheralDenoiserSpatialPasses.value_for_config()).c_str());
+        ini.SetValue("DLSSD", "PeripheralDenoiserSpatialRadius",
+                     GetFloatValue(Instance()->DLSSDPeripheralDenoiserSpatialRadius.value_for_config()).c_str());
+        ini.SetValue("DLSSD", "PeripheralDenoiserMaxHistory",
+                     GetIntValue(Instance()->DLSSDPeripheralDenoiserMaxHistory.value_for_config()).c_str());
         ini.SetValue("DLSSD", "RenderPresetOverride",
                      GetBoolValue(Instance()->DLSSDRenderPresetOverride.value_for_config()).c_str());
         ini.SetValue("DLSSD", "RenderPresetForAll",

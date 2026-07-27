@@ -64,6 +64,8 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
 
     // Those upcalers don't have their own sharpness so always need to use RCAS when sharpness is set
     auto upscaler = GetUpscalerType();
+    const bool dlssdRawColorBypass =
+        upscaler == Upscaler::DLSSD && Config::Instance()->DLSSDRawColorBypass.value_or_default();
     bool useRcas = upscaler == Upscaler::XeSS ||
                    (upscaler == Upscaler::DLSS && Version() >= feature_version(2, 5, 1)) || upscaler == Upscaler::DLSSD;
 
@@ -74,17 +76,24 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         useRcas = false;
 
     // Need RCAS for MAS
-    if (!useRcas && (Config::Instance()->MotionSharpnessEnabled.value_or_default() &&
-                     Config::Instance()->MotionSharpness.value_or_default() > 0.0f))
+    if (!dlssdRawColorBypass && !useRcas &&
+        (Config::Instance()->MotionSharpnessEnabled.value_or_default() &&
+         Config::Instance()->MotionSharpness.value_or_default() > 0.0f))
     {
         useRcas = true;
     }
+
+    // The DLSSD raw-Color diagnostic must reach the game's original Output unchanged.
+    // Do not silently place OptiScaler scaling, sharpening, or magnification after it.
+    if (dlssdRawColorBypass)
+        useRcas = false;
 
     if (!RCAS->IsInit())
         useRcas = false;
 
     bool useOutputScaling =
-        Config::Instance()->OutputScalingEnabled.value_or_default() && (LowResMV() || RenderWidth() == DisplayWidth());
+        !dlssdRawColorBypass && Config::Instance()->OutputScalingEnabled.value_or_default() &&
+        (LowResMV() || RenderWidth() == DisplayWidth());
 
     if (!OutputScaler->IsInit())
         useOutputScaling = false;
@@ -194,7 +203,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
               } });
     }
 
-    if (Magnifier->ShouldRun())
+    if (!dlssdRawColorBypass && Magnifier->ShouldRun())
     {
         pipeline.push_back(
             { // Setup

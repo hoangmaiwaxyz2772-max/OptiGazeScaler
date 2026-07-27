@@ -49,6 +49,11 @@ class Shader_Dx12
                             uint32_t rtvCount = 0, uint32_t samplerCount = 0, uint32_t staticSamplerCount = 0,
                             const D3D12_STATIC_SAMPLER_DESC* pStaticSamplers = nullptr,
                             D3D12_ROOT_SIGNATURE_FLAGS flags = D3D12_ROOT_SIGNATURE_FLAG_NONE);
+    bool SetupRootSignatureWithConstants(ID3D12Device* InDevice, uint32_t srcCount, uint32_t uavCount,
+                                         uint32_t constantDwords, uint32_t rtvCount = 0,
+                                         uint32_t staticSamplerCount = 0,
+                                         const D3D12_STATIC_SAMPLER_DESC* pStaticSamplers = nullptr,
+                                         D3D12_ROOT_SIGNATURE_FLAGS flags = D3D12_ROOT_SIGNATURE_FLAG_NONE);
 
     bool InitHeaps(ID3D12Device* InDevice, FrameDescriptorHeap* pHeaps, size_t numOFHeaps);
 

@@ -255,6 +255,13 @@ class Config
     CustomOptional<uint32_t> RenderPresetUltraPerformance { 0 };
 
     // DLSSD
+    CustomOptional<bool> DLSSDRawColorBypass { false };
+    CustomOptional<bool> DLSSDDepthDebugView { false };
+    CustomOptional<bool> DLSSDPeripheralDenoiser { false };
+    CustomOptional<int> DLSSDPeripheralDenoiserDebugView { 0 };
+    CustomOptional<int> DLSSDPeripheralDenoiserSpatialPasses { 2 };
+    CustomOptional<float> DLSSDPeripheralDenoiserSpatialRadius { 1.5f };
+    CustomOptional<int> DLSSDPeripheralDenoiserMaxHistory { 16 };
     CustomOptional<bool> DLSSDRenderPresetOverride { false };
     CustomOptional<uint32_t> DLSSDRenderPresetForAll { 0 };
     CustomOptional<uint32_t> DLSSDRenderPresetDLAA { 0 };
@@ -421,9 +428,22 @@ class Config
     CustomOptional<bool> GazeRoiPeripheralJitterCancel { true };
     CustomOptional<int> GazeRoiPeripheralJitterSign { 1 };
     CustomOptional<bool> GazeRoiPeripheralTemporal { true };
-    CustomOptional<float> GazeRoiPeripheralTemporalCurrentWeight { 0.2f };
-    CustomOptional<float> GazeRoiPeripheralTemporalReactiveScale { 4.0f };
+    CustomOptional<bool> GazeRoiPeripheralTemporalMotionReprojection { true };
+    CustomOptional<float> GazeRoiPeripheralTemporalHistoryWeight { 0.75f };
+    CustomOptional<float> GazeRoiPeripheralTemporalCurrentWeight { 0.08f };
+    CustomOptional<float> GazeRoiPeripheralTemporalReactiveScale { 2.0f };
     CustomOptional<bool> GazeRoiDebugBorder { false };
+    CustomOptional<bool> GazeRoiMotionVectorDebugView { false };
+    CustomOptional<bool> GazeRoiOutputClearDebug { false };
+    CustomOptional<bool> GazeRoiCurrentColorPointBypass { false };
+    CustomOptional<bool> GazeRoiColorCopy { false };
+    CustomOptional<bool> GazeRoiDepthCopy { true };
+    CustomOptional<bool> GazeRoiOmitBiasCurrentColorHint { false };
+    CustomOptional<bool> GazeRoiMinimalPrivateParameters { false };
+    CustomOptional<bool> GazeRoiResetOnMove { false };
+    CustomOptional<bool> GazeRoiGpuTiming { false };
+    CustomOptional<bool> GazeRoiShowAdvancedDebug { false };
+    CustomOptional<std::string> GazeRoiMotionVectorMode { "InputDelta" };
     CustomOptional<std::string> GazeRoiControl { "Keyboard" };
     CustomOptional<int> GazeRoiUdpPort { 38479 };
     CustomOptional<int> GazeRoiStaleMs { 50 };
