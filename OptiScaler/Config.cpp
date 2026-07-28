@@ -348,6 +348,20 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (auto setting = readInt("GazeRoi", "FeatherPx"); setting.has_value())
                 GazeRoiFeatherPx.set_from_config(std::clamp(setting.value(), 0, 512));
 
+            auto peripheralMode = readInt("GazeRoi", "PeripheralReconstructionMode");
+            if (peripheralMode.has_value())
+                GazeRoiPeripheralMode.set_from_config(
+                    std::clamp(peripheralMode.value(), 0,
+                               static_cast<int>(GazeRoiPeripheralReconstructionMode::IntermediateColorTaau)));
+            GazeRoiPeripheralEasu.set_from_config(readBool("GazeRoi", "PeripheralEasu"));
+            GazeRoiPeripheralTemporalDetail.set_from_config(
+                readBool("GazeRoi", "PeripheralTemporalDetail"));
+            if (auto setting = readFloat("GazeRoi", "PeripheralTemporalDetailScale"); setting.has_value())
+                GazeRoiPeripheralTemporalDetailScale.set_from_config(
+                    std::clamp(setting.value(), 1.0f, 2.0f));
+            if (auto setting = readFloat("GazeRoi", "PeripheralTemporalDetailStrength"); setting.has_value())
+                GazeRoiPeripheralTemporalDetailStrength.set_from_config(
+                    std::clamp(setting.value(), 0.0f, 4.0f));
             GazeRoiPeripheralBlur.set_from_config(readBool("GazeRoi", "PeripheralBlur"));
 
             if (auto setting = readFloat("GazeRoi", "PeripheralBlurRadius"); setting.has_value())
@@ -358,9 +372,6 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (auto setting = readInt("GazeRoi", "PeripheralJitterSign"); setting.has_value())
                 GazeRoiPeripheralJitterSign.set_from_config(setting.value() < 0 ? -1 : 1);
 
-            GazeRoiPeripheralTemporal.set_from_config(readBool("GazeRoi", "PeripheralTemporal"));
-            GazeRoiPeripheralTemporalMotionReprojection.set_from_config(
-                readBool("GazeRoi", "PeripheralTemporalMotionReprojection"));
             // Keep the former key readable so existing profiles retain their value;
             // newly written profiles use the explicit history-retention name.
             auto historyWeight = readFloat("GazeRoi", "PeripheralTemporalHistoryWeight");
@@ -370,8 +381,6 @@ bool Config::Reload(std::filesystem::path iniPath)
                 GazeRoiPeripheralTemporalHistoryWeight.set_from_config(
                     std::clamp(historyWeight.value(), 0.0f, 1.0f));
 
-            if (auto setting = readFloat("GazeRoi", "PeripheralTemporalCurrentWeight"); setting.has_value())
-                GazeRoiPeripheralTemporalCurrentWeight.set_from_config(std::clamp(setting.value(), 0.02f, 1.0f));
 
             if (auto setting = readFloat("GazeRoi", "PeripheralTemporalReactiveScale"); setting.has_value())
                 GazeRoiPeripheralTemporalReactiveScale.set_from_config(std::clamp(setting.value(), 0.0f, 16.0f));
@@ -1233,6 +1242,16 @@ bool Config::SaveIni()
         ini.SetValue("GazeRoi", "WidthPx", GetIntValue(Instance()->GazeRoiWidthPx.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "HeightPx", GetIntValue(Instance()->GazeRoiHeightPx.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "FeatherPx", GetIntValue(Instance()->GazeRoiFeatherPx.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralReconstructionMode",
+                     GetIntValue(Instance()->GazeRoiPeripheralMode.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralEasu",
+                     GetBoolValue(Instance()->GazeRoiPeripheralEasu.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralTemporalDetail",
+                     GetBoolValue(Instance()->GazeRoiPeripheralTemporalDetail.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralTemporalDetailScale",
+                     GetFloatValue(Instance()->GazeRoiPeripheralTemporalDetailScale.value_for_config()).c_str());
+        ini.SetValue("GazeRoi", "PeripheralTemporalDetailStrength",
+                     GetFloatValue(Instance()->GazeRoiPeripheralTemporalDetailStrength.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "PeripheralBlur",
                      GetBoolValue(Instance()->GazeRoiPeripheralBlur.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "PeripheralBlurRadius",
@@ -1241,14 +1260,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->GazeRoiPeripheralJitterCancel.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "PeripheralJitterSign",
                      GetIntValue(Instance()->GazeRoiPeripheralJitterSign.value_for_config()).c_str());
-        ini.SetValue("GazeRoi", "PeripheralTemporal",
-                     GetBoolValue(Instance()->GazeRoiPeripheralTemporal.value_for_config()).c_str());
-        ini.SetValue("GazeRoi", "PeripheralTemporalMotionReprojection",
-                     GetBoolValue(Instance()->GazeRoiPeripheralTemporalMotionReprojection.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "PeripheralTemporalHistoryWeight",
                      GetFloatValue(Instance()->GazeRoiPeripheralTemporalHistoryWeight.value_for_config()).c_str());
-        ini.SetValue("GazeRoi", "PeripheralTemporalCurrentWeight",
-                     GetFloatValue(Instance()->GazeRoiPeripheralTemporalCurrentWeight.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "PeripheralTemporalReactiveScale",
                      GetFloatValue(Instance()->GazeRoiPeripheralTemporalReactiveScale.value_for_config()).c_str());
         ini.SetValue("GazeRoi", "DebugBorder",

@@ -1506,6 +1506,33 @@ bool DLSSFeatureDx12::ResolveGazeRoiOptimalInput(NVSDK_NGX_Parameter* InParamete
     return true;
 }
 
+void DLSSFeatureDx12::RetireGazeRoiDlssHandle()
+{
+    if (_p_gazeRoiDlssHandle == nullptr)
+        return;
+
+    NVSDK_NGX_Handle* retiredHandle = _p_gazeRoiDlssHandle;
+    const bool copiedLocalHandle = retiredHandle == &_gazeRoiDlssHandle;
+    if (copiedLocalHandle)
+        retiredHandle = new NVSDK_NGX_Handle(_gazeRoiDlssHandle);
+
+    const unsigned int retiredHandleId = retiredHandle->Id;
+    const uintptr_t retiredHandleAddress = reinterpret_cast<uintptr_t>(retiredHandle);
+    GazeRoiFrameSync::DeferCallback(
+        [retiredHandle, copiedLocalHandle]()
+        {
+            if (const auto releaseFeature = NVNGXProxy::D3D12_ReleaseFeature(); releaseFeature != nullptr)
+                releaseFeature(retiredHandle);
+            if (copiedLocalHandle)
+                delete retiredHandle;
+        });
+    LOG_INFO("[GROI_CONTRACT] retired private ROI feature handle ptr={:X} id={} pending fence release",
+             retiredHandleAddress, retiredHandleId);
+    _p_gazeRoiDlssHandle = nullptr;
+    _gazeRoiDlssHandle = {};
+    _gazeRoiHandleCreateSignature.clear();
+}
+
 bool DLSSFeatureDx12::EnsureGazeRoiDlssHandle(ID3D12GraphicsCommandList* InCommandList,
                                               NVSDK_NGX_Parameter* InParameters, const GazeRoiRect& outputRect,
                                               const GazeRoiRect& inputRect)
@@ -1545,22 +1572,7 @@ bool DLSSFeatureDx12::EnsureGazeRoiDlssHandle(ID3D12GraphicsCommandList* InComma
         return true;
     }
 
-    if (_p_gazeRoiDlssHandle != nullptr && NVNGXProxy::D3D12_ReleaseFeature() != nullptr)
-    {
-        auto* retiredHandle = new NVSDK_NGX_Handle(_gazeRoiDlssHandle);
-        const unsigned int retiredHandleId = retiredHandle->Id;
-        GazeRoiFrameSync::DeferCallback(
-            [retiredHandle]()
-            {
-                if (const auto releaseFeature = NVNGXProxy::D3D12_ReleaseFeature(); releaseFeature != nullptr)
-                    releaseFeature(retiredHandle);
-                delete retiredHandle;
-            });
-        LOG_INFO("[GROI_CONTRACT] retired private ROI feature handle id={} pending fence release",
-                 retiredHandleId);
-        _p_gazeRoiDlssHandle = nullptr;
-        _gazeRoiDlssHandle = {};
-    }
+    RetireGazeRoiDlssHandle();
 
     NVSDK_NGX_Parameter* createParameters = InParameters;
     std::unique_ptr<NgxParameterScope> createScope;
@@ -1632,8 +1644,9 @@ bool DLSSFeatureDx12::EnsureGazeRoiDlssHandle(ID3D12GraphicsCommandList* InComma
     _gazeRoiHandleOutputRect = outputRect;
     _gazeRoiHandleCreateSignature = createSignature;
     _gazeRoiHandleWasCreated = true;
-    LOG_INFO("Gaze ROI DLSS feature created: {}x{} -> {}x{}", inputRect.width, inputRect.height, outputRect.width,
-             outputRect.height);
+    LOG_INFO("Gaze ROI DLSS feature created: ptr={:X} id={} {}x{} -> {}x{}",
+             reinterpret_cast<uintptr_t>(_p_gazeRoiDlssHandle), _p_gazeRoiDlssHandle->Id,
+             inputRect.width, inputRect.height, outputRect.width, outputRect.height);
     return true;
 }
 
@@ -1814,9 +1827,57 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
     const bool colorCopy = Config::Instance()->GazeRoiColorCopy.value_or_default();
     const bool depthCopy = Config::Instance()->GazeRoiDepthCopy.value_or_default();
     const bool resetOnMove = Config::Instance()->GazeRoiResetOnMove.value_or_default();
-    const bool peripheralBlur = Config::Instance()->GazeRoiPeripheralBlur.value_or_default();
-    const bool peripheralTemporal = Config::Instance()->GazeRoiPeripheralTemporal.value_or_default();
-    const bool peripheralTemporalMotionReprojection = peripheralTemporal;
+    const auto peripheralMode = static_cast<GazeRoiPeripheralReconstructionMode>(
+        std::clamp(Config::Instance()->GazeRoiPeripheralMode.value_or_default(), 0,
+                   static_cast<int>(GazeRoiPeripheralReconstructionMode::IntermediateColorTaau)));
+    const bool peripheralIntermediateTaau =
+        peripheralMode == GazeRoiPeripheralReconstructionMode::IntermediateColorTaau;
+    // Keep the retired joint shader and resource path available in source, but
+    // do not expose or dispatch it through any public reconstruction mode.
+    const bool peripheralJoint = false;
+    const bool peripheralCurrentOnly = peripheralMode == GazeRoiPeripheralReconstructionMode::DejitteredCurrent;
+    const bool peripheralUsesHistory = !peripheralCurrentOnly;
+    const bool peripheralTemporalDetail =
+        peripheralMode == GazeRoiPeripheralReconstructionMode::LightweightTaa &&
+        Config::Instance()->GazeRoiPeripheralTemporalDetail.value_or_default();
+    const float peripheralTemporalDetailScale = std::clamp(
+        Config::Instance()->GazeRoiPeripheralTemporalDetailScale.value_or_default(), 1.0f, 2.0f);
+    const float peripheralTemporalDetailStrength = std::clamp(
+        Config::Instance()->GazeRoiPeripheralTemporalDetailStrength.value_or_default(), 0.0f, 4.0f);
+    // EASU did not improve the high-frequency peripheral content that dominates
+    // gaze-transition quality. Keep its persisted key readable for rollback,
+    // but do not silently reactivate the hidden legacy path.
+    const bool peripheralEasu = false;
+    const bool peripheralBlur = !peripheralCurrentOnly &&
+                                Config::Instance()->GazeRoiPeripheralBlur.value_or_default();
+    // Keep the low bits as the shader reconstruction mode. Bit 2 carries the
+    // feature's depth convention and bit 4 selects the independent intermediate
+    // TAAU resolve without expanding the shared 64-dword root-constant block.
+    const int peripheralTemporalMode = peripheralUsesHistory ? 2 : 8;
+    const int peripheralTemporal = peripheralTemporalMode |
+                                   (peripheralUsesHistory && DepthInverted() ? 4 : 0) |
+                                   (peripheralIntermediateTaau ? 16 : 0);
+    const bool peripheralTemporalMotionReprojection = peripheralUsesHistory;
+    uint32_t peripheralResolveWidth = RenderWidth();
+    uint32_t peripheralResolveHeight = RenderHeight();
+    if (peripheralIntermediateTaau)
+    {
+        constexpr float intermediateScale = 1.25f;
+        peripheralResolveWidth = std::min(
+            TargetWidth(), std::max(RenderWidth(), static_cast<uint32_t>(
+                                                   std::lround(RenderWidth() * intermediateScale))));
+        peripheralResolveHeight = std::min(
+            TargetHeight(), std::max(RenderHeight(), static_cast<uint32_t>(
+                                                    std::lround(RenderHeight() * intermediateScale))));
+    }
+    const uint32_t peripheralDetailWidth = peripheralTemporalDetail
+                                               ? std::min(TargetWidth(), std::max(RenderWidth(), static_cast<uint32_t>(
+                                                     std::lround(RenderWidth() * peripheralTemporalDetailScale))))
+                                               : 0;
+    const uint32_t peripheralDetailHeight = peripheralTemporalDetail
+                                                ? std::min(TargetHeight(), std::max(RenderHeight(), static_cast<uint32_t>(
+                                                      std::lround(RenderHeight() * peripheralTemporalDetailScale))))
+                                                : 0;
     const bool diagnosticOptionsChanged =
         _gazeDiagnosticOptionsInitialized &&
         (currentColorPointBypass != _gazePreviousCurrentColorPointBypass ||
@@ -1850,12 +1911,37 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
         GazeRoiDepthCrop = std::make_unique<GazeRoiDepthCrop_Dx12>("GazeRoiDepthCrop", Device);
 
     const auto outputDesc = output->GetDesc();
+    bool privateOutputContractChanged = false;
+    if (_p_gazeRoiDlssHandle != nullptr && GazeRoi != nullptr && GazeRoi->DlssOutput() != nullptr)
+    {
+        const auto privateOutputDesc = GazeRoi->DlssOutput()->GetDesc();
+        const D3D12_RESOURCE_FLAGS expectedFlags =
+            (outputDesc.Flags & ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) |
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS |
+            D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+        privateOutputContractChanged =
+            privateOutputDesc.Width != outputRect.width || privateOutputDesc.Height != outputRect.height ||
+            privateOutputDesc.Format != outputDesc.Format || privateOutputDesc.Flags != expectedFlags;
+    }
+    const bool privateHandleContractChanged =
+        _p_gazeRoiDlssHandle != nullptr &&
+        (_gazeRoiHandleInputRect.width != inputRect.width ||
+         _gazeRoiHandleInputRect.height != inputRect.height ||
+         _gazeRoiHandleOutputRect.width != outputRect.width ||
+         _gazeRoiHandleOutputRect.height != outputRect.height || privateOutputContractChanged);
+    if (privateHandleContractChanged)
+        RetireGazeRoiDlssHandle();
+
     if (GazeRoi == nullptr || !GazeRoi->IsInit() ||
         !GazeRoi->CreateDlssOutputResource(Device, output, outputRect.width, outputRect.height,
                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS) ||
-        !GazeRoi->CreatePeripheralResource(Device, color, RenderWidth(), RenderHeight(), peripheralBlur,
-                                            peripheralTemporal, peripheralTemporalMotionReprojection,
+        !GazeRoi->CreatePeripheralResource(Device, color, peripheralResolveWidth, peripheralResolveHeight,
+                                            peripheralBlur || peripheralCurrentOnly, peripheralUsesHistory,
+                                            peripheralTemporalMotionReprojection, peripheralJoint,
                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS) ||
+        !GazeRoi->CreatePeripheralDetailResources(Device, color, peripheralDetailWidth, peripheralDetailHeight,
+                                                   peripheralTemporalDetail, peripheralJoint,
+                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS) ||
         GazeRoiMvPatch == nullptr || !GazeRoiMvPatch->IsInit() ||
          !GazeRoiMvPatch->CreatePatchedResource(Device, motionVectors, mvRect.width, mvRect.height,
                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS) ||
@@ -2239,13 +2325,13 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
     constants.featherPx = Config::Instance()->GazeRoiFeatherPx.value_or_default();
     constants.debugBorderPx = Config::Instance()->GazeRoiDebugBorder.value_or_default() ? 2 : 0;
     constants.peripheralBlur = peripheralBlur ? 1 : 0;
-    constants.peripheralBlurRadius =
-        std::clamp(Config::Instance()->GazeRoiPeripheralBlurRadius.value_or_default(), 0.0f, 3.0f);
+    constants.peripheralBlurRadius = std::clamp(Config::Instance()->GazeRoiPeripheralBlurRadius.value_or_default(),
+                                                 0.0f, 3.0f);
     constants.peripheralJitterCancel = Config::Instance()->GazeRoiPeripheralJitterCancel.value_or_default() ? 1 : 0;
     constants.peripheralJitterSign = Config::Instance()->GazeRoiPeripheralJitterSign.value_or_default() < 0 ? -1 : 1;
     constants.jitterOffsetX = jitterOffsetX;
     constants.jitterOffsetY = jitterOffsetY;
-    constants.peripheralTemporal = peripheralTemporal ? 1 : 0;
+    constants.peripheralTemporal = peripheralTemporal;
     constants.peripheralTemporalMotionReprojection = peripheralTemporalMotionReprojection ? 1 : 0;
     constants.peripheralTemporalHistoryReset = resetHistory ? 1 : 0;
     constants.peripheralDepthBaseX = static_cast<int32_t>(depthBaseX);
@@ -2274,11 +2360,21 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
     constants.motionVectorHeight = static_cast<int32_t>(mvRect.height);
     constants.motionVectorScaleX = mvScaleX;
     constants.motionVectorScaleY = mvScaleY;
+    constants.peripheralResolveWidth = static_cast<int32_t>(peripheralResolveWidth);
+    constants.peripheralResolveHeight = static_cast<int32_t>(peripheralResolveHeight);
+    const float safePreExposure = std::isfinite(preExposure) && preExposure > 1.0e-6f ? preExposure : 1.0f;
+    const float previousPreExposure = _gazeHasPreviousInputRect ? _gazePreviousPreExposure : safePreExposure;
+    // EASU is retired. Preserve the fixed root-constant layout by using its
+    // unused tail for inline TAAU detail strength and exposure scalars.
+    constants.easuConst0[1] = std::bit_cast<uint32_t>(peripheralTemporalDetailStrength);
+    constants.easuConst0[3] = std::bit_cast<uint32_t>(safePreExposure);
+    constants.easuConst1[0] = std::bit_cast<uint32_t>(previousPreExposure);
 
     if (gpuTimingActive)
         GazeRoiFrameSync::WriteGpuTimestamp(InCommandList, gazeRoiFrameSlot, 4);
     if (!GazeRoi->Dispatch(InCommandList, color, depth, motionVectors, effectiveMotionVectors, output, constants,
-                           gazeRoiFrameSlot))
+                           gazeRoiFrameSlot, peripheralTemporalDetail, peripheralDetailWidth,
+                           peripheralDetailHeight, peripheralTemporalDetailStrength, peripheralEasu))
     {
         LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_COMPOSITE_DISPATCH");
         nvResult = NVSDK_NGX_Result_Fail;
@@ -2287,7 +2383,7 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
     }
     if (gpuTimingActive)
     {
-        GazeRoiFrameSync::WriteGpuTimestamp(InCommandList, gazeRoiFrameSlot, 5);
+        GazeRoiFrameSync::WriteGpuTimestamp(InCommandList, gazeRoiFrameSlot, 6);
         GazeRoiFrameSync::ResolveGpuTiming(InCommandList, gazeRoiFrameSlot);
     }
 
@@ -2303,11 +2399,26 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
     _gazePreviousResetOnMove = resetOnMove;
     _gazePreviousJitterOffsetX = jitterOffsetX;
     _gazePreviousJitterOffsetY = jitterOffsetY;
+    _gazePreviousPreExposure = safePreExposure;
+    const char* detailPath = "off";
+    if (peripheralIntermediateTaau)
+        detailPath = "inline-taau";
+    else if (peripheralTemporalDetail)
+        detailPath = peripheralJoint
+                         ? "joint"
+                         : (peripheralDetailWidth == peripheralResolveWidth &&
+                                    peripheralDetailHeight == peripheralResolveHeight
+                                ? "fused"
+                                : "separate");
     LOG_DEBUG("Gaze ROI replacement: lowResMV={} out {}x{}+{},{} input {}x{}+{},{} rawMvOffset {},{} reset={} "
-              "privateOutputMode={} colorCopy={}",
+              "privateOutputMode={} colorCopy={} peripheralMode={} peripheralEasu={} temporalDetail={} "
+              "detailPath={} detailScale={:.2f} detailStrength={:.2f} peripheralResolve={}x{} detailResolve={}x{}",
               lowResMotionVectors, outputRect.width, outputRect.height, outputRect.x, outputRect.y, inputRect.width,
               inputRect.height, inputRect.x, inputRect.y, rawMvOffsetX, rawMvOffsetY, resetHistory,
-              currentColorPointBypass ? "current-color-point-bypass" : "private-dlss", colorCopy);
+              currentColorPointBypass ? "current-color-point-bypass" : "private-dlss", colorCopy,
+              static_cast<int>(peripheralMode), peripheralEasu, peripheralTemporalDetail,
+              detailPath, peripheralTemporalDetailScale, peripheralTemporalDetailStrength, peripheralResolveWidth,
+              peripheralResolveHeight, peripheralDetailWidth, peripheralDetailHeight);
     return true;
 }
 

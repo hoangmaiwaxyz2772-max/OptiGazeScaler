@@ -5767,8 +5767,8 @@ void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
         bool peripheralJitterCancel = config->GazeRoiPeripheralJitterCancel.value_or_default();
         if (ImGui::Checkbox("Peripheral Jitter Cancel", &peripheralJitterCancel))
             config->GazeRoiPeripheralJitterCancel = peripheralJitterCancel;
-        ShowHelpMarker("Offsets low-resolution peripheral sampling by the DLSS jitter offset before blur. This is a "
-                       "spatial de-jitter step, not temporal accumulation.");
+        ShowHelpMarker("Temporal Stabilization shifts only its current Color sampling. Lightweight TAA instead uses "
+                       "this phase consistently for Color, Depth, MV, and stable-history reprojection.");
 
         ImGui::BeginDisabled(!peripheralJitterCancel);
         int jitterSign = config->GazeRoiPeripheralJitterSign.value_or_default() < 0 ? -1 : 1;
@@ -5806,34 +5806,87 @@ void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
         else
         {
             ImGui::SeparatorText("DLSS Periphery");
-            bool peripheralBlur = config->GazeRoiPeripheralBlur.value_or_default();
-            if (ImGui::Checkbox("Spatial Blur", &peripheralBlur))
-                config->GazeRoiPeripheralBlur = peripheralBlur;
-            ImGui::BeginDisabled(!peripheralBlur);
-            float peripheralBlurRadius = config->GazeRoiPeripheralBlurRadius.value_or_default();
-            if (ImGui::SliderFloat("Blur Radius", &peripheralBlurRadius, 0.0f, 3.0f, "%.2f"))
-                config->GazeRoiPeripheralBlurRadius = std::clamp(peripheralBlurRadius, 0.0f, 3.0f);
-            ImGui::EndDisabled();
+            int peripheralMode = std::clamp(
+                config->GazeRoiPeripheralMode.value_or_default(), 0,
+                static_cast<int>(GazeRoiPeripheralReconstructionMode::IntermediateColorTaau));
+            const char* peripheralModes[] = {
+                "De-jittered Current (baseline)",
+                "Lightweight TAA (Cauldron/MJP)",
+                "1.25x Lightweight TAAU (experimental)",
+            };
+            if (ImGui::Combo("Peripheral Reconstruction", &peripheralMode, peripheralModes,
+                             IM_ARRAYSIZE(peripheralModes)))
+                config->GazeRoiPeripheralMode = peripheralMode;
+            ShowHelpMarker("The baseline runs only the jitter-aware current-frame reconstruction and allocates no "
+                           "temporal history. Lightweight TAA is the validated render-resolution two-frequency path. "
+                           "The experimental TAAU replaces both its base and detail paths with one fixed-1.25x "
+                           "FSR2-derived reconstruction and accumulation pass.");
 
-            bool peripheralTemporal = config->GazeRoiPeripheralTemporal.value_or_default();
-            if (ImGui::Checkbox("Temporal Stabilization", &peripheralTemporal))
-                config->GazeRoiPeripheralTemporal = peripheralTemporal;
-            ImGui::BeginDisabled(!peripheralTemporal);
-            float temporalHistoryWeight =
-                std::clamp(config->GazeRoiPeripheralTemporalHistoryWeight.value_or_default(), 0.0f, 1.0f);
-            if (ImGui::SliderFloat("History Retention", &temporalHistoryWeight, 0.0f, 1.0f, "%.2f"))
-                config->GazeRoiPeripheralTemporalHistoryWeight = temporalHistoryWeight;
-            ImGui::EndDisabled();
-            ShowHelpMarker("Fraction of motion/depth-validated previous color retained in the periphery. 0 uses only "
-                           "the current frame; 1 maximizes temporal accumulation. Reactive color changes reduce history.");
+            if (peripheralMode == static_cast<int>(GazeRoiPeripheralReconstructionMode::LightweightTaa))
+            {
+                bool temporalDetail = config->GazeRoiPeripheralTemporalDetail.value_or_default();
+                if (ImGui::Checkbox("Temporal Detail Reconstruction", &temporalDetail))
+                    config->GazeRoiPeripheralTemporalDetail = temporalDetail;
+                ShowHelpMarker("Accumulates only a motion/depth-reprojected high-frequency luminance residual, then "
+                               "adds it to the stable render-resolution TAA base.");
 
-            ImGui::BeginDisabled(!peripheralTemporal);
-            float reactiveScale = std::clamp(config->GazeRoiPeripheralTemporalReactiveScale.value_or_default(), 0.0f, 16.0f);
-            if (ImGui::SliderFloat("Change Rejection", &reactiveScale, 0.0f, 4.0f, "%.2f"))
-                config->GazeRoiPeripheralTemporalReactiveScale = reactiveScale;
-            ImGui::EndDisabled();
-            ShowHelpMarker("How strongly a current/history color difference reduces temporal history. 0 tolerates color "
-                           "changes; higher values react faster and reduce trails at the cost of less accumulation.");
+                ImGui::BeginDisabled(!temporalDetail);
+                float temporalDetailScale = std::clamp(
+                    config->GazeRoiPeripheralTemporalDetailScale.value_or_default(), 1.0f, 2.0f);
+                if (ImGui::SliderFloat("Detail History Scale", &temporalDetailScale, 1.0f, 2.0f, "%.2fx"))
+                    config->GazeRoiPeripheralTemporalDetailScale =
+                        std::clamp(temporalDetailScale, 1.0f, 2.0f);
+                float temporalDetailStrength = std::clamp(
+                    config->GazeRoiPeripheralTemporalDetailStrength.value_or_default(), 0.0f, 4.0f);
+                if (ImGui::SliderFloat("Detail Strength", &temporalDetailStrength, 0.0f, 4.0f, "%.2f"))
+                    config->GazeRoiPeripheralTemporalDetailStrength =
+                        std::clamp(temporalDetailStrength, 0.0f, 4.0f);
+                ImGui::EndDisabled();
+                ShowHelpMarker("Scale 1 uses the fused render-resolution path. Higher scales use a separate pass and "
+                               "grow one RG16 residual/depth ping-pong pair. Strength above 2 uses a soft overshoot "
+                               "limiter; the main Color/Depth histories remain at render resolution.");
+            }
+            else if (peripheralMode == static_cast<int>(GazeRoiPeripheralReconstructionMode::IntermediateColorTaau))
+            {
+                float temporalDetailStrength = std::clamp(
+                    config->GazeRoiPeripheralTemporalDetailStrength.value_or_default(), 0.0f, 4.0f);
+                if (ImGui::SliderFloat("Detail Strength", &temporalDetailStrength, 0.0f, 4.0f, "%.2f"))
+                    config->GazeRoiPeripheralTemporalDetailStrength =
+                        std::clamp(temporalDetailStrength, 0.0f, 4.0f);
+                ShowHelpMarker("Applies the validated five-point detail residual inside the TAAU current-frame "
+                               "reconstruction before temporal accumulation. It reuses the existing 3x3 samples, "
+                               "adds no texture or dispatch, and uses the same soft limit above strength 2.");
+            }
+            if (peripheralMode == static_cast<int>(GazeRoiPeripheralReconstructionMode::LightweightTaa))
+            {
+                bool peripheralBlur = config->GazeRoiPeripheralBlur.value_or_default();
+                if (ImGui::Checkbox("Spatial Blur", &peripheralBlur))
+                    config->GazeRoiPeripheralBlur = peripheralBlur;
+                ImGui::BeginDisabled(!peripheralBlur);
+                float peripheralBlurRadius = config->GazeRoiPeripheralBlurRadius.value_or_default();
+                if (ImGui::SliderFloat("Blur Radius", &peripheralBlurRadius, 0.0f, 3.0f, "%.2f"))
+                    config->GazeRoiPeripheralBlurRadius = std::clamp(peripheralBlurRadius, 0.0f, 3.0f);
+                ImGui::EndDisabled();
+            }
+
+            if (peripheralMode != static_cast<int>(GazeRoiPeripheralReconstructionMode::DejitteredCurrent))
+            {
+                float temporalHistoryWeight =
+                    std::clamp(config->GazeRoiPeripheralTemporalHistoryWeight.value_or_default(), 0.0f, 1.0f);
+                if (ImGui::SliderFloat("History Retention", &temporalHistoryWeight, 0.0f, 1.0f, "%.2f"))
+                    config->GazeRoiPeripheralTemporalHistoryWeight = temporalHistoryWeight;
+                ShowHelpMarker("Lightweight TAA treats this as its maximum history fraction. Lightweight TAAU uses "
+                               "it as the maximum accumulated sample weight; motion, depth rejection, and reactive "
+                               "changes lower the effective history automatically.");
+
+                float reactiveScale = std::clamp(
+                    config->GazeRoiPeripheralTemporalReactiveScale.value_or_default(), 0.0f, 16.0f);
+                if (ImGui::SliderFloat("Change Rejection", &reactiveScale, 0.0f, 4.0f, "%.2f"))
+                    config->GazeRoiPeripheralTemporalReactiveScale = reactiveScale;
+                ShowHelpMarker("How strongly a significant current/history change reduces temporal history. "
+                               "Lightweight TAA normalizes this signal by neighborhood variance and suppresses it on "
+                               "stable surfaces, so jittered edges can still accumulate.");
+            }
         }
 
         ImGui::SeparatorText("Inspection");

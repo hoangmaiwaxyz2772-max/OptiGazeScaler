@@ -47,6 +47,7 @@ class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
     bool _gazeExternalSourceFresh = false;
     float _gazePreviousJitterOffsetX = 0.0f;
     float _gazePreviousJitterOffsetY = 0.0f;
+    float _gazePreviousPreExposure = 1.0f;
     float _gazePointX = 0.5f;
     float _gazePointY = 0.5f;
 
@@ -59,6 +60,7 @@ class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
     void CaptureGazeRoiCreatePresets(NVSDK_NGX_Parameter* InParameters);
     uint32_t GazeRoiCreatePresetValue(NVSDK_NGX_Parameter* InParameters, size_t index) const;
     bool EnsureGazeRoiMinimalParameters();
+    void RetireGazeRoiDlssHandle();
     bool EnsureGazeRoiDlssHandle(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters,
                                  const GazeRoiRect& outputRect, const GazeRoiRect& inputRect);
     bool TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters,

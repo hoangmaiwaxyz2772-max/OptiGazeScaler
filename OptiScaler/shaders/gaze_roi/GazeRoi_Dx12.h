@@ -88,6 +88,12 @@ struct alignas(256) GazeRoiConstants
     int32_t motionVectorHeight = 0;
     float motionVectorScaleX = 1.0f;
     float motionVectorScaleY = 1.0f;
+    int32_t peripheralResolveWidth = 0;
+    int32_t peripheralResolveHeight = 0;
+    uint32_t easuConst0[4] {};
+    uint32_t easuConst1[4] {};
+    uint32_t easuConst2[4] {};
+    uint32_t easuConst3[4] {};
 };
 
 struct alignas(256) GazeRoiMvConstants
@@ -215,6 +221,8 @@ class GazeRoi_Dx12 : public Shader_Dx12
   private:
     FrameDescriptorHeap _frameHeaps[GAZE_ROI_NUM_OF_HEAPS];
     FrameDescriptorHeap _peripheralFrameHeaps[GAZE_ROI_NUM_OF_HEAPS];
+    FrameDescriptorHeap _peripheralFusedDetailFrameHeaps[GAZE_ROI_NUM_OF_HEAPS];
+    FrameDescriptorHeap _peripheralDetailFrameHeaps[GAZE_ROI_NUM_OF_HEAPS];
     FrameDescriptorHeap _colorBypassFrameHeaps[GAZE_ROI_NUM_OF_HEAPS];
     FrameDescriptorHeap _outputClearFrameHeaps[GAZE_ROI_NUM_OF_HEAPS];
     FrameDescriptorHeap _debugOverlayFrameHeaps[GAZE_ROI_NUM_OF_HEAPS];
@@ -232,11 +240,25 @@ class GazeRoi_Dx12 : public Shader_Dx12
                                                                D3D12_RESOURCE_STATE_COMMON };
     uint32_t _peripheralHistoryIndex = 0;
     bool _peripheralHistoryInitialized = false;
+    int32_t _peripheralHistoryMode = -1;
+    ID3D12Resource* _peripheralDetailHistory[2] = { nullptr, nullptr };
+    D3D12_RESOURCE_STATES _peripheralDetailHistoryState[2] = { D3D12_RESOURCE_STATE_COMMON,
+                                                               D3D12_RESOURCE_STATE_COMMON };
+    uint32_t _peripheralDetailHistoryIndex = 0;
+    bool _peripheralDetailHistoryInitialized = false;
+    int32_t _peripheralDetailJointMode = -1;
+    ID3D12PipelineState* _easuCompositePipelineState = nullptr;
     ID3D12PipelineState* _peripheralPipelineState = nullptr;
+    ID3D12RootSignature* _peripheralFusedDetailRootSignature = nullptr;
+    ID3D12PipelineState* _peripheralFusedDetailPipelineState = nullptr;
+    ID3D12PipelineState* _peripheralJointDetailPipelineState = nullptr;
+    ID3D12PipelineState* _peripheralDetailPipelineState = nullptr;
     ID3D12PipelineState* _colorBypassPipelineState = nullptr;
     ID3D12PipelineState* _debugOverlayPipelineState = nullptr;
     ID3D12PipelineState* _depthDebugPipelineState = nullptr;
     bool _peripheralHeapsInitialized = false;
+    bool _peripheralFusedDetailHeapsInitialized = false;
+    bool _peripheralDetailHeapsInitialized = false;
     bool _colorBypassHeapsInitialized = false;
     bool _outputClearHeapsInitialized = false;
     bool _debugOverlayHeapsInitialized = false;
@@ -244,7 +266,12 @@ class GazeRoi_Dx12 : public Shader_Dx12
     uint32_t _numThreadsX = 16;
     uint32_t _numThreadsY = 16;
 
+    bool EnsureEasuCompositePipeline();
     bool EnsurePeripheralPipeline();
+    bool EnsurePeripheralExtendedDetailResources();
+    bool EnsurePeripheralFusedDetailPipeline();
+    bool EnsurePeripheralJointDetailPipeline();
+    bool EnsurePeripheralDetailPipeline();
     bool EnsureColorBypassPipeline();
     bool EnsureOutputClearHeaps();
     bool EnsureDebugOverlayPipeline();
@@ -255,8 +282,11 @@ class GazeRoi_Dx12 : public Shader_Dx12
                                   uint32_t height, D3D12_RESOURCE_STATES initialState);
     bool CreatePeripheralResource(ID3D12Device* device, ID3D12Resource* colorTemplate, uint32_t width,
                                   uint32_t height, bool blurEnabled, bool temporalEnabled,
-                                  bool motionReprojectionEnabled,
+                                  bool motionReprojectionEnabled, bool jointDetailEnabled,
                                   D3D12_RESOURCE_STATES initialState);
+    bool CreatePeripheralDetailResources(ID3D12Device* device, ID3D12Resource* colorTemplate, uint32_t width,
+                                         uint32_t height, bool enabled, bool jointMode,
+                                         D3D12_RESOURCE_STATES initialState);
     void SetDlssOutputState(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES state);
     bool DispatchCurrentColorPointBypass(ID3D12GraphicsCommandList* commandList, ID3D12Resource* sourceColor,
                                          const GazeRoiColorConstants& constants, uint32_t frameSlot);
@@ -266,12 +296,17 @@ class GazeRoi_Dx12 : public Shader_Dx12
     bool Dispatch(ID3D12GraphicsCommandList* commandList, ID3D12Resource* lowResColor,
                   ID3D12Resource* lowResDepth, ID3D12Resource* peripheralMotionVectors,
                   ID3D12Resource* patchedMotionVectors, ID3D12Resource* finalOutput,
-                  const GazeRoiConstants& constants, uint32_t frameSlot);
+                  const GazeRoiConstants& constants, uint32_t frameSlot, bool peripheralDetailEnabled = false,
+                  uint32_t peripheralDetailWidth = 0, uint32_t peripheralDetailHeight = 0,
+                  float peripheralDetailStrength = 0.0f, bool peripheralEasu = false);
     bool DispatchComposite(ID3D12GraphicsCommandList* commandList, ID3D12Resource* peripheralColor,
                            ID3D12Resource* patchedMotionVectors, ID3D12Resource* finalOutput,
                            const GazeRoiConstants& constants, uint32_t frameSlot,
                            ID3D12Resource* depthDebugResource = nullptr,
-                           const GazeRoiDepthDebugConstants& depthDebugConstants = {});
+                           const GazeRoiDepthDebugConstants& depthDebugConstants = {},
+                           ID3D12Resource* peripheralDetail = nullptr,
+                           float peripheralDetailStrength = 0.0f,
+                           bool peripheralEasu = false);
 
     ID3D12Resource* DlssOutput() const { return _dlssOutput; }
     bool CanRender() const { return _init && _dlssOutput != nullptr; }

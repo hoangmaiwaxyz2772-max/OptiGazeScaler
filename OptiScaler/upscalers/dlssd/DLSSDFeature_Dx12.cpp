@@ -352,12 +352,16 @@ bool DLSSDFeatureDx12::EnsureGazeRoiRrHandle(ID3D12GraphicsCommandList* commandL
 
     if (_p_gazeRoiRrHandle != nullptr)
     {
-        auto* retired = new NVSDK_NGX_Handle(_gazeRoiRrHandle);
-        GazeRoiFrameSync::DeferCallback([retired]()
+        NVSDK_NGX_Handle* retired = _p_gazeRoiRrHandle;
+        const bool copiedLocalHandle = retired == &_gazeRoiRrHandle;
+        if (copiedLocalHandle)
+            retired = new NVSDK_NGX_Handle(_gazeRoiRrHandle);
+        GazeRoiFrameSync::DeferCallback([retired, copiedLocalHandle]()
         {
             if (const auto release = NVNGXProxy::D3D12_ReleaseFeature(); release != nullptr)
                 release(retired);
-            delete retired;
+            if (copiedLocalHandle)
+                delete retired;
         });
         _p_gazeRoiRrHandle = nullptr;
         _gazeRoiRrHandle = {};

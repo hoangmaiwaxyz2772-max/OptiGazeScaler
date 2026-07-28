@@ -12,6 +12,13 @@ enum HasDefaultValue
     SoftDefault // Change always gets saved to the config
 };
 
+enum class GazeRoiPeripheralReconstructionMode : int
+{
+    DejitteredCurrent = 0,
+    LightweightTaa = 1,
+    IntermediateColorTaau = 2,
+};
+
 template <class T, HasDefaultValue defaultState = WithDefault> class CustomOptional : public std::optional<T>
 {
   private:
@@ -423,14 +430,18 @@ class Config
     CustomOptional<int> GazeRoiWidthPx { 1280 };
     CustomOptional<int> GazeRoiHeightPx { 720 };
     CustomOptional<int> GazeRoiFeatherPx { 96 };
+    CustomOptional<int> GazeRoiPeripheralMode {
+        static_cast<int>(GazeRoiPeripheralReconstructionMode::LightweightTaa)
+    };
+    CustomOptional<bool> GazeRoiPeripheralEasu { false };
+    CustomOptional<bool> GazeRoiPeripheralTemporalDetail { false };
+    CustomOptional<float> GazeRoiPeripheralTemporalDetailScale { 1.0f };
+    CustomOptional<float> GazeRoiPeripheralTemporalDetailStrength { 2.0f };
     CustomOptional<bool> GazeRoiPeripheralBlur { true };
     CustomOptional<float> GazeRoiPeripheralBlurRadius { 1.0f };
     CustomOptional<bool> GazeRoiPeripheralJitterCancel { true };
     CustomOptional<int> GazeRoiPeripheralJitterSign { 1 };
-    CustomOptional<bool> GazeRoiPeripheralTemporal { true };
-    CustomOptional<bool> GazeRoiPeripheralTemporalMotionReprojection { true };
     CustomOptional<float> GazeRoiPeripheralTemporalHistoryWeight { 0.75f };
-    CustomOptional<float> GazeRoiPeripheralTemporalCurrentWeight { 0.08f };
     CustomOptional<float> GazeRoiPeripheralTemporalReactiveScale { 2.0f };
     CustomOptional<bool> GazeRoiDebugBorder { false };
     CustomOptional<bool> GazeRoiMotionVectorDebugView { false };
