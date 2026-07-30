@@ -559,7 +559,8 @@ ffxReturnCode_t ffxConfigure_Dx12FG(ffxContext* context, ffxConfigureDescHeader*
                 auto crDesc = (ffxConfigureDescFrameGenerationRegisterDistortionFieldResource*) next;
                 LOG_DEBUG("DistortionFieldResource found: {:X}", (size_t) crDesc->distortionField.resource);
 
-                if (fg->FrameGenerationContext() != nullptr && crDesc->distortionField.resource != nullptr)
+                if (fg->FrameGenerationContext() != nullptr && crDesc->distortionField.resource != nullptr &&
+                    !fg->IsLocalRoiContext())
                 {
                     Dx12Resource dfr {};
                     dfr.cmdList = nullptr; // Not sure about this
@@ -615,7 +616,7 @@ ffxReturnCode_t ffxConfigure_Dx12FG(ffxContext* context, ffxConfigureDescHeader*
             }
         }
 
-        if (cDesc->HUDLessColor.resource != nullptr &&
+        if (cDesc->HUDLessColor.resource != nullptr && !fg->IsLocalRoiContext() &&
             !Config::Instance()->FSRFGSkipConfigForHudless.value_or_default())
         {
             Dx12Resource hudless {};
@@ -677,7 +678,8 @@ ffxReturnCode_t ffxConfigure_Dx12FG(ffxContext* context, ffxConfigureDescHeader*
         auto crDesc = (ffxConfigureDescFrameGenerationRegisterDistortionFieldResource*) desc;
         LOG_DEBUG("DistortionFieldResource found: {:X}", (size_t) crDesc->distortionField.resource);
 
-        if (fg->FrameGenerationContext() != nullptr && crDesc->distortionField.resource != nullptr)
+        if (fg->FrameGenerationContext() != nullptr && crDesc->distortionField.resource != nullptr &&
+            !fg->IsLocalRoiContext())
         {
             auto fIndex = fg->GetIndexWillBeDispatched();
             if (fIndex < 0)
@@ -801,7 +803,8 @@ ffxReturnCode_t ffxConfigure_Dx12FG(ffxContext* context, ffxConfigureDescHeader*
                     auto crDesc = (ffxConfigureDescFrameGenerationRegisterDistortionFieldResource*) next;
                     LOG_DEBUG("DistortionFieldResource found: {:X}", (size_t) crDesc->distortionField.resource);
 
-                    if (fg->FrameGenerationContext() != nullptr && crDesc->distortionField.resource != nullptr)
+                    if (fg->FrameGenerationContext() != nullptr && crDesc->distortionField.resource != nullptr &&
+                        !fg->IsLocalRoiContext())
                     {
                         Dx12Resource dfr {};
                         dfr.cmdList = nullptr; // Not sure about this
@@ -992,6 +995,7 @@ ffxReturnCode_t ffxDispatch_Dx12FG(ffxContext* context, ffxDispatchDescHeader* d
 
                 if (cdDesc->presentColor.resource != nullptr &&
                     !Config::Instance()->FSRFGSkipDispatchForHudless.value_or_default() &&
+                    !fg->UseLocalRoiStagingBypass() &&
                     !fg->GetResource(FG_ResourceType::HudlessColor))
                 {
                     UINT width = cdDesc->generationRect.width;
@@ -1299,30 +1303,51 @@ void ffxPresentCallback()
             currentBuffer->SetName(std::format(L"currentBuffer[{}]", scIndex).c_str());
         }
 
-        if (CreateBufferResource(_device, currentBuffer, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &_hudless[fIndex]))
-            _hudless[fIndex]->SetName(std::format(L"_hudless[{}]", fIndex).c_str());
-        else
-            return;
-
         if (cmdList == nullptr)
             cmdList = fg->GetUICommandList(fIndex);
 
+        if (cmdList == nullptr)
+        {
+            LOG_ERROR("No command list available for frame-generation callback");
+            return;
+        }
+
+        const bool roiStagingBypass = fg->UseLocalRoiStagingBypass();
+        if (roiStagingBypass)
+        {
+            // The local FSR context consumes only a cropped view of this image.
+            // Keep the swapchain resource as the callback source so ROI mode does
+            // not pay a physical-resolution HUD-less copy.
+            LOG_DEBUG("FSR FG ROI staging bypass: using current swapchain buffer directly");
+            ResourceBarrier(cmdList, currentBuffer, D3D12_RESOURCE_STATE_PRESENT,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+        else
+        {
+            if (CreateBufferResource(_device, currentBuffer, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                     &_hudless[fIndex]))
+                _hudless[fIndex]->SetName(std::format(L"_hudless[{}]", fIndex).c_str());
+            else
+                return;
+
+            ResourceBarrier(cmdList, currentBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            ResourceBarrier(cmdList, _hudless[fIndex], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                            D3D12_RESOURCE_STATE_COPY_DEST);
+
+            cmdList->CopyResource(_hudless[fIndex], currentBuffer);
+
+            ResourceBarrier(cmdList, currentBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            ResourceBarrier(cmdList, _hudless[fIndex], D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+
         ddfg.commandList = cmdList;
-
-        ResourceBarrier(cmdList, currentBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        ResourceBarrier(cmdList, _hudless[fIndex], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        D3D12_RESOURCE_STATE_COPY_DEST);
-
-        cmdList->CopyResource(_hudless[fIndex], currentBuffer);
-
-        ResourceBarrier(cmdList, currentBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        ResourceBarrier(cmdList, _hudless[fIndex], D3D12_RESOURCE_STATE_COPY_DEST,
-                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         ddfg.outputs[0] = ffxApiGetResourceDX12(currentBuffer, FFX_API_RESOURCE_STATE_GENERIC_READ,
                                                 FFX_API_RESOURCE_USAGE_RENDERTARGET);
-        ddfg.presentColor = ffxApiGetResourceDX12(_hudless[fIndex], FFX_API_RESOURCE_STATE_GENERIC_READ);
+        ddfg.presentColor = ffxApiGetResourceDX12(
+            roiStagingBypass ? currentBuffer : _hudless[fIndex], FFX_API_RESOURCE_STATE_GENERIC_READ);
         ddfg.reset = false;
 
         _fgCallbackCalled = true;
@@ -1332,7 +1357,7 @@ void ffxPresentCallback()
         ResourceBarrier(cmdList, currentBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                         D3D12_RESOURCE_STATE_PRESENT);
 
-        if (result == FFX_API_RETURN_OK)
+        if (result == FFX_API_RETURN_OK && !roiStagingBypass)
         {
             if (!fg->GetResource(FG_ResourceType::HudlessColor, fIndex))
             {

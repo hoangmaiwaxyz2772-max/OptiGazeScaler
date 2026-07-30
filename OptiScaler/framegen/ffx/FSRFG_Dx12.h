@@ -7,6 +7,18 @@
 #include <shaders/hudless_compare_compute/HCC_Dx12.h>
 
 #include <ffx_framegeneration.h>
+#include <gaze_roi/GazeRoiInput.h>
+#include <shaders/gaze_roi/GazeRoi_Dx12.h>
+
+struct FsrFgRoiRect
+{
+    UINT left = 0;
+    UINT top = 0;
+    UINT width = 0;
+    UINT height = 0;
+
+    bool IsValid() const { return width != 0 && height != 0; }
+};
 
 class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 {
@@ -32,6 +44,26 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 
     ID3D12GraphicsCommandList* _fgCommandList[BUFFER_COUNT] {};
     ID3D12CommandAllocator* _fgCommandAllocator[BUFFER_COUNT] {};
+
+    // Local ROI resources are opt-in. The physical output remains owned by
+    // the swapchain provider; these surfaces only carry the local FI work.
+    ID3D12Resource* _roiColor[BUFFER_COUNT] {};
+    ID3D12Resource* _roiPreviousColor[BUFFER_COUNT] {};
+    ID3D12Resource* _roiOutput[BUFFER_COUNT] {};
+    ID3D12Resource* _roiDepth[BUFFER_COUNT] {};
+    ID3D12Resource* _roiVelocity[BUFFER_COUNT] {};
+    ID3D12Resource* _roiRealColorHistory[BUFFER_COUNT] {};
+    UINT64 _roiRealColorHistoryFrameId[BUFFER_COUNT] {};
+    bool _roiRealColorHistoryValid[BUFFER_COUNT] {};
+    FsrFgRoiRect _roiRealColorHistoryRect[BUFFER_COUNT] {};
+    FsrFgRoiRect _roiRect[BUFFER_COUNT] {};
+    UINT64 _roiProviderHistoryFrameId = 0;
+    FsrFgRoiRect _roiProviderHistoryRect {};
+    bool _roiProviderHistoryValid = false;
+    bool _roiContextActive = false;
+    UINT _physicalDisplayWidth = 0;
+    UINT _physicalDisplayHeight = 0;
+    int _deferredPrepareIndex = -1;
 
     static FfxApiResourceState GetFfxApiState(D3D12_RESOURCE_STATES state)
     {
@@ -63,11 +95,26 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     }
 
     bool ExecuteCommandList(int index);
-    bool Dispatch();
+    bool Dispatch(bool deferExecution = false);
+    uint32_t GetFrameGenerationFlags() const;
+    bool RecordPrepare(int index, UINT64 frameId, ID3D12GraphicsCommandList* commandList, uint32_t flags,
+                       const FsrFgRoiRect* lockedRoi = nullptr);
     void ConfigureFramePaceTuning();
     bool HudlessFormatTransfer(int index, ID3D12Device* device, DXGI_FORMAT targetFormat, Dx12Resource* resource);
     bool UIFormatTransfer(int index, ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, DXGI_FORMAT targetFormat,
                           Dx12Resource* resource);
+
+    FsrFgRoiRect ResolveRoi(int index, UINT displayWidth, UINT displayHeight);
+    bool CreateRoiSurface(ID3D12Resource* source, UINT width, UINT height, D3D12_RESOURCE_STATES initialState,
+                          ID3D12Resource** target, bool allowUav);
+    bool CopyRoi(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source, D3D12_RESOURCE_STATES sourceState,
+                 const FsrFgRoiRect& sourceRoi, ID3D12Resource* target, UINT targetWidth, UINT targetHeight,
+                 D3D12_RESOURCE_STATES targetState);
+    bool CopyFull(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source, D3D12_RESOURCE_STATES sourceState,
+                  ID3D12Resource* target, D3D12_RESOURCE_STATES targetState);
+    bool PrepareLocalInputResources(int index, ID3D12GraphicsCommandList* commandList, const FsrFgRoiRect& roi,
+                                    UINT displayWidth, UINT displayHeight);
+    void ReleaseLocalResources();
 
     void ParseVersion(const char* version_str, feature_version* _version)
     {
@@ -120,6 +167,8 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 
     bool SetResource(Dx12Resource* inputResource) override final;
     void SetCommandQueue(FG_ResourceType type, ID3D12CommandQueue* queue) override final;
+    bool IsLocalRoiContext() const override final;
+    bool UseLocalRoiStagingBypass() const override final;
 
     ffxReturnCode_t DispatchCallback(ffxDispatchDescFrameGeneration* params);
 

@@ -36,6 +36,7 @@
 #include <misc/IdentifyGpu.h>
 #include <hooks/Xell_Hooks.h>
 #include <low_latency/input/input_common.h>
+#include <shaders/gaze_roi/GazeRoi_Dx12.h>
 
 #define MARK_ALL_BACKENDS_CHANGED()                                                                                    \
     for (auto& singleChangeBackend : State::Instance().changeBackend)                                                  \
@@ -3563,6 +3564,115 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
                 ShowHelpMarker("After changing this option, please Save Settings\n"
                                "It will be applied on next launch.");
+            }
+
+            ImGui::Spacing();
+            bool fsrFgRoiEnabled = config->FSRFGROIEnabled.value_or_default();
+            if (ImGui::Checkbox("FSR FG Gaze ROI", &fsrFgRoiEnabled))
+            {
+                config->FSRFGROIEnabled = fsrFgRoiEnabled;
+                state.fgChanged = true;
+                state.scChanged = true;
+                LOG_INFO("FSR FG ROI enabled: {}", fsrFgRoiEnabled);
+            }
+            ShowHelpMarker("Runs FSR frame generation in a fixed-size region centered on gaze");
+
+            ImGui::BeginDisabled(!fsrFgRoiEnabled);
+            ImGui::PushItemWidth(105.0f * menuResScale);
+            int fsrFgRoiWidth = config->FSRFGROIWidthPx.value_or_default();
+            if (ImGui::InputInt("ROI Width", &fsrFgRoiWidth, 64, 128))
+            {
+                config->FSRFGROIWidthPx = std::clamp(fsrFgRoiWidth, 64, 8192);
+                state.fgChanged = true;
+                state.scChanged = true;
+            }
+
+            ImGui::SameLine(0.0f, 16.0f);
+            int fsrFgRoiHeight = config->FSRFGROIHeightPx.value_or_default();
+            if (ImGui::InputInt("ROI Height", &fsrFgRoiHeight, 64, 128))
+            {
+                config->FSRFGROIHeightPx = std::clamp(fsrFgRoiHeight, 64, 8192);
+                state.fgChanged = true;
+                state.scChanged = true;
+            }
+            ImGui::PopItemWidth();
+
+            bool fsrFgRoiStagingBypass = config->FSRFGROIStagingBypass.value_or_default();
+            if (ImGui::Checkbox("ROI staging bypass", &fsrFgRoiStagingBypass))
+            {
+                config->FSRFGROIStagingBypass = fsrFgRoiStagingBypass;
+                LOG_INFO("FSR FG ROI staging bypass: {}", fsrFgRoiStagingBypass);
+            }
+            ShowHelpMarker("Uses the swapchain image directly in ROI mode and skips full-display HUD-less staging. "
+                           "Disable for an A/B comparison.");
+
+            bool fsrFgRoiBatchPrepare = config->FSRFGROIBatchPrepare.value_or_default();
+            if (ImGui::Checkbox("Batch ROI Prepare submission", &fsrFgRoiBatchPrepare))
+            {
+                config->FSRFGROIBatchPrepare = fsrFgRoiBatchPrepare;
+                LOG_INFO("FSR FG ROI batched Prepare submission: {}", fsrFgRoiBatchPrepare);
+            }
+            ShowHelpMarker("Preserves FSR's callback-before-Prepare ordering while submitting the callback, UI and "
+                           "Prepare command lists together. Disable for an A/B comparison.");
+
+            ImGui::EndDisabled();
+
+            if (fsrFgRoiEnabled && config->GazeRoiGpuTiming.value_or_default())
+            {
+                if (auto ch = ScopedCollapsingHeader("FSR FG ROI GPU Timing"); ch.IsHeaderOpen())
+                {
+                    const auto snapshot = GazeRoiFrameSync::GetFsrFgTimingSnapshot();
+                    if (ImGui::Button("Clear Timing"))
+                        GazeRoiFrameSync::ClearFsrFgTimingSnapshot();
+                    ImGui::SameLine();
+                    ImGui::Text("Rolling samples: %u", snapshot.windowSize);
+                    ShowHelpMarker("GPU timestamps are resolved asynchronously after queue completion. "
+                                   "Prime groups are identified by whether the moving-ROI history dispatch was issued.");
+
+                    if (ImGui::BeginTable("fsrFgRoiTimingTable", 6,
+                                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                              ImGuiTableFlags_SizingStretchProp))
+                    {
+                        ImGui::TableSetupColumn("Group");
+                        ImGui::TableSetupColumn("N");
+                        ImGui::TableSetupColumn("Avg ms");
+                        ImGui::TableSetupColumn("P50 ms");
+                        ImGui::TableSetupColumn("P95 ms");
+                        ImGui::TableSetupColumn("Max ms");
+                        ImGui::TableHeadersRow();
+                        const auto drawMetric = [](const char* name,
+                                                   const GazeRoiFrameSync::TimingMetricStats& metric) {
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            ImGui::TextUnformatted(name);
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::Text("%u", metric.count);
+                            ImGui::TableSetColumnIndex(2);
+                            ImGui::Text("%.4f", metric.meanMs);
+                            ImGui::TableSetColumnIndex(3);
+                            ImGui::Text("%.4f", metric.p50Ms);
+                            ImGui::TableSetColumnIndex(4);
+                            ImGui::Text("%.4f", metric.p95Ms);
+                            ImGui::TableSetColumnIndex(5);
+                            ImGui::Text("%.4f", metric.maxMs);
+                        };
+                        const auto drawGroup = [&drawMetric](const char* group,
+                                                              const GazeRoiFrameSync::TimingGroupStats& stats) {
+                            drawMetric((std::string(group) + " placeholder").c_str(), stats.placeholder);
+                            drawMetric((std::string(group) + " prev ROI crop").c_str(), stats.previousRoiCrop);
+                            drawMetric((std::string(group) + " full history save").c_str(), stats.fullHistorySave);
+                            drawMetric((std::string(group) + " color crop").c_str(), stats.colorCrop);
+                            drawMetric((std::string(group) + " history prime").c_str(), stats.historyPrime);
+                            drawMetric((std::string(group) + " provider").c_str(), stats.provider);
+                            drawMetric((std::string(group) + " composite").c_str(), stats.composite);
+                            drawMetric((std::string(group) + " total").c_str(), stats.total);
+                        };
+                        drawGroup("All", snapshot.all);
+                        drawGroup("Prime", snapshot.prime);
+                        drawGroup("Non-prime", snapshot.nonPrime);
+                        ImGui::EndTable();
+                    }
+                }
             }
 
             ImGui::Spacing();

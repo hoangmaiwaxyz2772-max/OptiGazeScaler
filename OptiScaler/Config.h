@@ -626,6 +626,17 @@ class Config
     CustomOptional<bool> FSRFGSkipDispatchForHudless { false };
     CustomOptional<bool> FSRFGEnableWatermark { false };
 
+    // Experimental local FSR frame-generation region. Disabled by default so
+    // the existing full-display provider path remains unchanged.
+    CustomOptional<bool> FSRFGROIEnabled { false };
+    CustomOptional<int> FSRFGROIWidthPx { 1280 };
+    CustomOptional<int> FSRFGROIHeightPx { 720 };
+    CustomOptional<bool> FSRFGROIUseGaze { true };
+    CustomOptional<int, NoDefault> FSRFGROIFixedLeft;
+    CustomOptional<int, NoDefault> FSRFGROIFixedTop;
+    CustomOptional<bool> FSRFGROIStagingBypass { true };
+    CustomOptional<bool> FSRFGROIBatchPrepare { false };
+
     // XeFG
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };
     CustomOptional<int> FGXeFGInterpolationCount { 1 };

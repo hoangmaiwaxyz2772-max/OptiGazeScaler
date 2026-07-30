@@ -118,6 +118,15 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     virtual bool SetResource(Dx12Resource* inputResource) = 0;
     virtual void SetCommandQueue(FG_ResourceType type, ID3D12CommandQueue* queue) = 0;
 
+    // Local FSR FG ROI uses zero-based resources and must not receive physical
+    // display-sized optional inputs through the generic callback bridge.
+    virtual bool IsLocalRoiContext() const { return false; }
+
+    // The local FSR ROI may additionally bind the swapchain image directly
+    // instead of staging a full-display HUD-less resource. Other backends keep
+    // the normal staging contract.
+    virtual bool UseLocalRoiStagingBypass() const { return false; }
+
     ID3D12GraphicsCommandList* GetUICommandList(int index = -1);
     ID3D12GraphicsCommandList* GetSCCommandList(int index = -1);
 

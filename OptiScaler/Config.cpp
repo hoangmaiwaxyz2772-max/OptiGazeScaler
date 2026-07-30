@@ -159,6 +159,17 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGFPTHybridSpinTime.set_from_config(readInt("FSRFG", "FPTHybridSpinTime"));
             FGFPTAllowWaitForSingleObjectOnFence.set_from_config(readBool("FSRFG", "FPTWaitForSingleObjectOnFence"));
             FSRFGEnableWatermark.set_from_config(readBool("FSRFG", "EnableWatermark"));
+
+            FSRFGROIEnabled.set_from_config(readBool("FSRFGROI", "Enabled"));
+            if (auto setting = readInt("FSRFGROI", "WidthPx"); setting.has_value())
+                FSRFGROIWidthPx.set_from_config(std::clamp(setting.value(), 64, 8192));
+            if (auto setting = readInt("FSRFGROI", "HeightPx"); setting.has_value())
+                FSRFGROIHeightPx.set_from_config(std::clamp(setting.value(), 64, 8192));
+            FSRFGROIUseGaze.set_from_config(readBool("FSRFGROI", "UseGaze"));
+            FSRFGROIFixedLeft.set_from_config(readInt("FSRFGROI", "FixedLeft"));
+            FSRFGROIFixedTop.set_from_config(readInt("FSRFGROI", "FixedTop"));
+            FSRFGROIStagingBypass.set_from_config(readBool("FSRFGROI", "StagingBypass"));
+            FSRFGROIBatchPrepare.set_from_config(readBool("FSRFGROI", "BatchPrepare"));
         }
 
         // OptiFG
@@ -1060,6 +1071,16 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FGFPTAllowWaitForSingleObjectOnFence.value_for_config()).c_str());
         ini.SetValue("FSRFG", "EnableWatermark",
                      GetBoolValue(Instance()->FSRFGEnableWatermark.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "Enabled", GetBoolValue(Instance()->FSRFGROIEnabled.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "WidthPx", GetIntValue(Instance()->FSRFGROIWidthPx.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "HeightPx", GetIntValue(Instance()->FSRFGROIHeightPx.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "UseGaze", GetBoolValue(Instance()->FSRFGROIUseGaze.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "FixedLeft", GetIntValue(Instance()->FSRFGROIFixedLeft.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "FixedTop", GetIntValue(Instance()->FSRFGROIFixedTop.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "StagingBypass",
+                     GetBoolValue(Instance()->FSRFGROIStagingBypass.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "BatchPrepare",
+                     GetBoolValue(Instance()->FSRFGROIBatchPrepare.value_for_config()).c_str());
     }
 
     // XeFG output

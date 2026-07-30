@@ -9,8 +9,11 @@
 
 #include <array>
 #include <bit>
+#include <deque>
 #include <mutex>
 #include <unordered_map>
+#include <algorithm>
+#include <numeric>
 
 using Microsoft::WRL::ComPtr;
 
@@ -33,6 +36,14 @@ struct GazeRoiSlot
     bool timingActive = false;
     bool timingResolved = false;
     UINT64 timestampFrequency = 0;
+    uint32_t timingKind = 0;
+    bool timingPrimeIssued = false;
+};
+
+struct FsrFgTimingSample
+{
+    double values[8] {};
+    bool prime = false;
 };
 
 struct GazeRoiQueueFence
@@ -65,9 +76,49 @@ static_assert(offsetof(GazeRoiConstants, peripheralResolveWidth) == 45 * sizeof(
 static_assert(offsetof(GazeRoiConstants, easuConst0) == 47 * sizeof(uint32_t));
 static_assert(offsetof(GazeRoiConstants, easuConst3) + sizeof(GazeRoiConstants::easuConst3) ==
               GAZE_ROI_COMPOSITE_CONSTANT_DWORDS * sizeof(uint32_t));
-constexpr UINT GAZE_ROI_TIMING_MARKERS = 7;
+constexpr UINT GAZE_ROI_TIMING_MARKERS = 8;
+constexpr size_t FSRFG_TIMING_WINDOW = 512;
 ComPtr<ID3D12QueryHeap> gazeRoiTimestampHeap;
 ComPtr<ID3D12Resource> gazeRoiTimestampReadback;
+std::deque<FsrFgTimingSample> fsrFgTimingSamples;
+
+GazeRoiFrameSync::TimingMetricStats BuildTimingMetricStats(const std::vector<double>& values)
+{
+    GazeRoiFrameSync::TimingMetricStats result {};
+    if (values.empty())
+        return result;
+    result.count = static_cast<uint32_t>(values.size());
+    result.meanMs = std::accumulate(values.begin(), values.end(), 0.0) / values.size();
+    auto sorted = values;
+    std::sort(sorted.begin(), sorted.end());
+    const auto percentile = [&sorted](double p) {
+        const size_t index = static_cast<size_t>(p * static_cast<double>(sorted.size() - 1));
+        return sorted[index];
+    };
+    result.p50Ms = percentile(0.50);
+    result.p95Ms = percentile(0.95);
+    result.maxMs = sorted.back();
+    return result;
+}
+
+GazeRoiFrameSync::TimingGroupStats BuildTimingGroupStats(const std::vector<FsrFgTimingSample>& samples)
+{
+    GazeRoiFrameSync::TimingGroupStats result {};
+    result.count = static_cast<uint32_t>(samples.size());
+    std::array<std::vector<double>, 8> values;
+    for (const auto& sample : samples)
+        for (size_t index = 0; index < values.size(); ++index)
+            values[index].push_back(sample.values[index]);
+    result.placeholder = BuildTimingMetricStats(values[0]);
+    result.previousRoiCrop = BuildTimingMetricStats(values[1]);
+    result.fullHistorySave = BuildTimingMetricStats(values[2]);
+    result.colorCrop = BuildTimingMetricStats(values[3]);
+    result.historyPrime = BuildTimingMetricStats(values[4]);
+    result.provider = BuildTimingMetricStats(values[5]);
+    result.composite = BuildTimingMetricStats(values[6]);
+    result.total = BuildTimingMetricStats(values[7]);
+    return result;
+}
 
 bool CreateGazeRoiRootSignature(ID3D12Device* device, UINT srvCount, UINT uavCount,
                                 const D3D12_STATIC_SAMPLER_DESC& sampler,
@@ -147,14 +198,49 @@ void LogCompletedGazeRoiTimingLocked(uint32_t slotIndex, GazeRoiSlot& slot)
     {
         const auto* timestamps = reinterpret_cast<const UINT64*>(mapped + byteOffset);
         const double millisecondsPerTick = 1000.0 / static_cast<double>(slot.timestampFrequency);
-        LOG_INFO("[GROI_TIMING] generation={} slot={} mvMs={:.4f} dlssMs={:.4f} peripheralMs={:.4f} "
-                 "compositeMs={:.4f} postMs={:.4f} totalMs={:.4f}",
-                 slot.generation, slotIndex, (timestamps[1] - timestamps[0]) * millisecondsPerTick,
-                 (timestamps[3] - timestamps[2]) * millisecondsPerTick,
-                 (timestamps[5] - timestamps[4]) * millisecondsPerTick,
-                 (timestamps[6] - timestamps[5]) * millisecondsPerTick,
-                 (timestamps[6] - timestamps[4]) * millisecondsPerTick,
-                 (timestamps[6] - timestamps[0]) * millisecondsPerTick);
+        if (slot.timingKind == 1)
+        {
+            const double milliseconds[8] = {
+                (timestamps[1] - timestamps[0]) * millisecondsPerTick,
+                (timestamps[2] - timestamps[1]) * millisecondsPerTick,
+                (timestamps[3] - timestamps[2]) * millisecondsPerTick,
+                (timestamps[4] - timestamps[3]) * millisecondsPerTick,
+                (timestamps[5] - timestamps[4]) * millisecondsPerTick,
+                (timestamps[6] - timestamps[5]) * millisecondsPerTick,
+                (timestamps[7] - timestamps[6]) * millisecondsPerTick,
+                (timestamps[7] - timestamps[0]) * millisecondsPerTick,
+            };
+            FsrFgTimingSample sample {};
+            sample.values[0] = milliseconds[0]; // placeholder
+            sample.values[1] = milliseconds[2]; // previous ROI crop
+            sample.values[2] = milliseconds[3]; // complete history save
+            sample.values[3] = milliseconds[1]; // current color crop
+            sample.values[4] = milliseconds[4];
+            sample.values[5] = milliseconds[5];
+            sample.values[6] = milliseconds[6];
+            sample.values[7] = milliseconds[7];
+            sample.prime = slot.timingPrimeIssued;
+            fsrFgTimingSamples.push_back(sample);
+            if (fsrFgTimingSamples.size() > FSRFG_TIMING_WINDOW)
+                fsrFgTimingSamples.pop_front();
+
+            LOG_INFO("[FSRFG_ROI_TIMING] generation={} slot={} placeholderMs={:.4f} previousRoiCropMs={:.4f} "
+                     "fullHistorySaveMs={:.4f} colorCropMs={:.4f} historyPrimeMs={:.4f} providerMs={:.4f} "
+                     "roiCompositeMs={:.4f} totalMs={:.4f}",
+                     slot.generation, slotIndex, sample.values[0], sample.values[1], sample.values[2], sample.values[3],
+                     sample.values[4], sample.values[5], sample.values[6], sample.values[7]);
+        }
+        else
+        {
+            LOG_INFO("[GROI_TIMING] generation={} slot={} mvMs={:.4f} dlssMs={:.4f} peripheralMs={:.4f} "
+                     "compositeMs={:.4f} postMs={:.4f} totalMs={:.4f}",
+                     slot.generation, slotIndex, (timestamps[1] - timestamps[0]) * millisecondsPerTick,
+                     (timestamps[3] - timestamps[2]) * millisecondsPerTick,
+                     (timestamps[5] - timestamps[4]) * millisecondsPerTick,
+                     (timestamps[6] - timestamps[5]) * millisecondsPerTick,
+                     (timestamps[6] - timestamps[4]) * millisecondsPerTick,
+                     (timestamps[6] - timestamps[0]) * millisecondsPerTick);
+        }
         const D3D12_RANGE writeRange = { 0, 0 };
         gazeRoiTimestampReadback->Unmap(0, &writeRange);
     }
@@ -162,6 +248,8 @@ void LogCompletedGazeRoiTimingLocked(uint32_t slotIndex, GazeRoiSlot& slot)
     slot.timingActive = false;
     slot.timingResolved = false;
     slot.timestampFrequency = 0;
+    slot.timingKind = 0;
+    slot.timingPrimeIssued = false;
 }
 
 bool HasActiveGazeRoiGenerationLocked(uint64_t retireAfterGeneration)
@@ -453,7 +541,7 @@ void GazeRoiFrameSync::FlushDeferred()
 }
 
 bool GazeRoiFrameSync::BeginGpuTiming(ID3D12Device* device, ID3D12GraphicsCommandList* commandList,
-                                      uint32_t frameSlot)
+                                      uint32_t frameSlot, uint32_t timingKind)
 {
     if (!Config::Instance()->GazeRoiGpuTiming.value_or_default() || device == nullptr || commandList == nullptr ||
         frameSlot >= GAZE_ROI_FRAME_SLOTS)
@@ -472,7 +560,41 @@ bool GazeRoiFrameSync::BeginGpuTiming(ID3D12Device* device, ID3D12GraphicsComman
     slot.timingActive = true;
     slot.timingResolved = false;
     slot.timestampFrequency = 0;
+    slot.timingKind = timingKind;
+    slot.timingPrimeIssued = false;
     return true;
+}
+
+void GazeRoiFrameSync::SetGpuTimingPrime(ID3D12GraphicsCommandList* commandList, uint32_t frameSlot, bool issued)
+{
+    if (commandList == nullptr || frameSlot >= GAZE_ROI_FRAME_SLOTS)
+        return;
+    std::lock_guard lock(gazeRoiFrameSyncMutex);
+    auto& slot = gazeRoiSlots[frameSlot];
+    if (slot.timingActive && slot.state == GazeRoiSlotState::Recording && slot.commandList == commandList)
+        slot.timingPrimeIssued = issued;
+}
+
+GazeRoiFrameSync::FsrFgTimingSnapshot GazeRoiFrameSync::GetFsrFgTimingSnapshot()
+{
+    std::lock_guard lock(gazeRoiFrameSyncMutex);
+    std::vector<FsrFgTimingSample> all(fsrFgTimingSamples.begin(), fsrFgTimingSamples.end());
+    std::vector<FsrFgTimingSample> prime;
+    std::vector<FsrFgTimingSample> nonPrime;
+    for (const auto& sample : all)
+        (sample.prime ? prime : nonPrime).push_back(sample);
+    FsrFgTimingSnapshot result {};
+    result.windowSize = static_cast<uint32_t>(all.size());
+    result.all = BuildTimingGroupStats(all);
+    result.prime = BuildTimingGroupStats(prime);
+    result.nonPrime = BuildTimingGroupStats(nonPrime);
+    return result;
+}
+
+void GazeRoiFrameSync::ClearFsrFgTimingSnapshot()
+{
+    std::lock_guard lock(gazeRoiFrameSyncMutex);
+    fsrFgTimingSamples.clear();
 }
 
 void GazeRoiFrameSync::WriteGpuTimestamp(ID3D12GraphicsCommandList* commandList, uint32_t frameSlot,

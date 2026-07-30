@@ -22,15 +22,49 @@
 class GazeRoiFrameSync
 {
   public:
+    struct TimingMetricStats
+    {
+        uint32_t count = 0;
+        double meanMs = 0.0;
+        double p50Ms = 0.0;
+        double p95Ms = 0.0;
+        double maxMs = 0.0;
+    };
+
+    struct TimingGroupStats
+    {
+        uint32_t count = 0;
+        TimingMetricStats placeholder;
+        TimingMetricStats previousRoiCrop;
+        TimingMetricStats fullHistorySave;
+        TimingMetricStats colorCrop;
+        TimingMetricStats historyPrime;
+        TimingMetricStats provider;
+        TimingMetricStats composite;
+        TimingMetricStats total;
+    };
+
+    struct FsrFgTimingSnapshot
+    {
+        TimingGroupStats all;
+        TimingGroupStats prime;
+        TimingGroupStats nonPrime;
+        uint32_t windowSize = 0;
+    };
+
     static bool Acquire(ID3D12GraphicsCommandList* commandList, uint32_t& frameSlot);
     static void OnExecuteCommandLists(ID3D12CommandQueue* commandQueue, UINT numCommandLists,
                                       ID3D12CommandList* const* commandLists);
     static void DeferRelease(IUnknown* object);
     static void DeferCallback(std::function<void()> callback);
     static void FlushDeferred();
-    static bool BeginGpuTiming(ID3D12Device* device, ID3D12GraphicsCommandList* commandList, uint32_t frameSlot);
+    static bool BeginGpuTiming(ID3D12Device* device, ID3D12GraphicsCommandList* commandList, uint32_t frameSlot,
+                               uint32_t timingKind = 0);
+    static void SetGpuTimingPrime(ID3D12GraphicsCommandList* commandList, uint32_t frameSlot, bool issued);
     static void WriteGpuTimestamp(ID3D12GraphicsCommandList* commandList, uint32_t frameSlot, uint32_t marker);
     static void ResolveGpuTiming(ID3D12GraphicsCommandList* commandList, uint32_t frameSlot);
+    static FsrFgTimingSnapshot GetFsrFgTimingSnapshot();
+    static void ClearFsrFgTimingSnapshot();
 };
 
 struct GazeRoiRect

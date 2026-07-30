@@ -302,6 +302,313 @@ HWND FSRFG_Dx12::Hwnd() { return _hwnd; }
 
 const char* FSRFG_Dx12::Name() { return "FSR-FG"; }
 
+bool FSRFG_Dx12::IsLocalRoiContext() const
+{
+    return _roiContextActive;
+}
+
+bool FSRFG_Dx12::UseLocalRoiStagingBypass() const
+{
+    return _roiContextActive && Config::Instance()->FSRFGROIStagingBypass.value_or_default();
+}
+
+uint32_t FSRFG_Dx12::GetFrameGenerationFlags() const
+{
+    const auto config = Config::Instance();
+    uint32_t flags = 0;
+
+    if (config->FGDebugView.value_or_default())
+        flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_VIEW;
+    if (config->FGDebugTearLines.value_or_default())
+        flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_TEAR_LINES;
+    if (config->FGDebugResetLines.value_or_default())
+        flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_RESET_INDICATORS;
+    if (config->FGDebugPacingLines.value_or_default())
+        flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_PACING_LINES;
+
+    return flags;
+}
+
+bool FSRFG_Dx12::RecordPrepare(int index, UINT64 frameId, ID3D12GraphicsCommandList* commandList, uint32_t flags,
+                               const FsrFgRoiRect* lockedRoi)
+{
+    if (_fgContext == nullptr || commandList == nullptr || index < 0 || index >= BUFFER_COUNT)
+        return false;
+
+    ffxCreateBackendDX12Desc backendDesc {};
+    backendDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
+    backendDesc.device = _device;
+
+    ffxDispatchDescFrameGenerationPrepareCameraInfo cameraData {};
+    cameraData.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_CAMERAINFO;
+    cameraData.header.pNext = &backendDesc.header;
+    std::memcpy(cameraData.cameraPosition, _cameraPosition[index], 3 * sizeof(float));
+    std::memcpy(cameraData.cameraUp, _cameraUp[index], 3 * sizeof(float));
+    std::memcpy(cameraData.cameraRight, _cameraRight[index], 3 * sizeof(float));
+    std::memcpy(cameraData.cameraForward, _cameraForward[index], 3 * sizeof(float));
+
+    ffxDispatchDescFrameGenerationPrepare prepare {};
+    prepare.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE;
+
+    const float* cameraDataRaw = cameraData.cameraPosition;
+    const bool cameraDataIsZeroed =
+        std::all_of(cameraDataRaw, cameraDataRaw + 12, [](float value) { return value == 0.0f; });
+    prepare.header.pNext = cameraDataIsZeroed ? &backendDesc.header : &cameraData.header;
+    prepare.commandList = commandList;
+    prepare.frameID = frameId;
+    prepare.flags = flags;
+
+    FsrFgRoiRect localRoi {};
+    if (_roiContextActive)
+    {
+        localRoi = lockedRoi != nullptr && lockedRoi->IsValid()
+                       ? *lockedRoi
+                       : (_roiRect[index].IsValid()
+                              ? _roiRect[index]
+                              : ResolveRoi(index, _physicalDisplayWidth, _physicalDisplayHeight));
+        if (!localRoi.IsValid() ||
+            !PrepareLocalInputResources(index, commandList, localRoi, _physicalDisplayWidth, _physicalDisplayHeight))
+        {
+            LOG_WARN("FSR FG local ROI input preparation failed for frame {}", frameId);
+            return false;
+        }
+    }
+
+    {
+        auto velocity = GetResource(FG_ResourceType::Velocity, index);
+        ID3D12Resource* velocityResource = nullptr;
+        if (velocity)
+            velocityResource = _roiContextActive ? _roiVelocity[index] : velocity->GetResource();
+        if (!velocity || !IsResourceReady(FG_ResourceType::Velocity, index) || velocityResource == nullptr)
+        {
+            LOG_ERROR("Velocity is missing");
+            return false;
+        }
+        prepare.motionVectors = ffxApiGetResourceDX12(
+            velocityResource,
+            _roiContextActive ? FFX_API_RESOURCE_STATE_COMPUTE_READ : GetFfxApiState(velocity->state));
+    }
+
+    auto& state = State::Instance();
+    {
+        auto depth = GetResource(FG_ResourceType::Depth, index);
+        ID3D12Resource* depthResource = nullptr;
+        if (depth)
+            depthResource = _roiContextActive ? _roiDepth[index] : depth->GetResource();
+        if (!depth || !IsResourceReady(FG_ResourceType::Depth, index) || depthResource == nullptr)
+        {
+            LOG_ERROR("Depth is missing");
+            return false;
+        }
+        prepare.depth = ffxApiGetResourceDX12(
+            depthResource, _roiContextActive ? FFX_API_RESOURCE_STATE_COMPUTE_READ : GetFfxApiState(depth->state));
+
+        if (_roiContextActive && _roiDepth[index] != nullptr)
+        {
+            const auto localDepthDesc = _roiDepth[index]->GetDesc();
+            prepare.renderSize = { static_cast<uint32_t>(localDepthDesc.Width), localDepthDesc.Height };
+        }
+        else if (state.currentFeature && state.activeFgInput == FGInput::Upscaler)
+            prepare.renderSize = { state.currentFeature->RenderWidth(), state.currentFeature->RenderHeight() };
+        else
+            prepare.renderSize = { static_cast<uint32_t>(depth->width), depth->height };
+    }
+
+    prepare.jitterOffset.x = _jitterX[index];
+    prepare.jitterOffset.y = _jitterY[index];
+    prepare.motionVectorScale.x = _mvScaleX[index];
+    prepare.motionVectorScale.y = _mvScaleY[index];
+    prepare.cameraFar = _cameraFar[index];
+    prepare.cameraNear = _cameraNear[index];
+    prepare.cameraFovAngleVertical = _cameraVFov[index];
+    if (_roiContextActive && localRoi.IsValid() && _physicalDisplayHeight != 0 &&
+        std::isfinite(prepare.cameraFovAngleVertical) && prepare.cameraFovAngleVertical > 0.0f)
+    {
+        const float cropScaleY = static_cast<float>(localRoi.height) / static_cast<float>(_physicalDisplayHeight);
+        prepare.cameraFovAngleVertical =
+            2.0f * std::atan(std::tan(prepare.cameraFovAngleVertical * 0.5f) * cropScaleY);
+    }
+
+    const auto config = Config::Instance();
+    prepare.frameTimeDelta = config->FTInput.value_or_default() == FrameTimeSource::Input
+                                 ? static_cast<float>(_ftDelta[index])
+                                 : static_cast<float>(state.lastFGFrameTime);
+    prepare.viewSpaceToMetersFactor = _meterFactor[index];
+
+    const auto result = FfxApiProxy::D3D12_Dispatch(&_fgContext, &prepare.header);
+    LOG_DEBUG("FSR FG Prepare result: {}, frame: {}, fIndex: {}, commandList: {:X}", result, frameId, index,
+              (size_t) commandList);
+    return result == FFX_API_RETURN_OK;
+}
+
+FsrFgRoiRect FSRFG_Dx12::ResolveRoi(int index, UINT displayWidth, UINT displayHeight)
+{
+    FsrFgRoiRect roi {};
+    if (!Config::Instance()->FSRFGROIEnabled.value_or_default() || displayWidth == 0 || displayHeight == 0)
+        return roi;
+
+    roi.width = std::min<UINT>(static_cast<UINT>(std::max(64, Config::Instance()->FSRFGROIWidthPx.value_or_default())),
+                               displayWidth);
+    roi.height = std::min<UINT>(static_cast<UINT>(std::max(64, Config::Instance()->FSRFGROIHeightPx.value_or_default())),
+                                displayHeight);
+
+    if (Config::Instance()->FSRFGROIUseGaze.value_or_default())
+    {
+        const auto sample = GazeRoiInput::Sample();
+        const auto centerX = static_cast<int64_t>(sample.x * static_cast<float>(displayWidth));
+        const auto centerY = static_cast<int64_t>(sample.y * static_cast<float>(displayHeight));
+        roi.left = static_cast<UINT>(std::clamp<int64_t>(centerX - roi.width / 2, 0, displayWidth - roi.width));
+        roi.top = static_cast<UINT>(std::clamp<int64_t>(centerY - roi.height / 2, 0, displayHeight - roi.height));
+    }
+    else
+    {
+        const auto left = Config::Instance()->FSRFGROIFixedLeft.value_or(
+            static_cast<int>((displayWidth - roi.width) / 2));
+        const auto top = Config::Instance()->FSRFGROIFixedTop.value_or(
+            static_cast<int>((displayHeight - roi.height) / 2));
+        roi.left = static_cast<UINT>(std::clamp(left, 0, static_cast<int>(displayWidth - roi.width)));
+        roi.top = static_cast<UINT>(std::clamp(top, 0, static_cast<int>(displayHeight - roi.height)));
+    }
+
+    _roiRect[index] = roi;
+    return roi;
+}
+
+bool FSRFG_Dx12::CreateRoiSurface(ID3D12Resource* source, UINT width, UINT height,
+                                  D3D12_RESOURCE_STATES initialState, ID3D12Resource** target, bool allowUav)
+{
+    if (source == nullptr || target == nullptr || width == 0 || height == 0)
+        return false;
+
+    if (!CreateBufferResourceWithSize(_device, source, initialState, target, width, height, allowUav, false))
+        return false;
+
+    return *target != nullptr;
+}
+
+bool FSRFG_Dx12::CopyRoi(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
+                         D3D12_RESOURCE_STATES sourceState, const FsrFgRoiRect& sourceRoi, ID3D12Resource* target,
+                         UINT targetWidth, UINT targetHeight, D3D12_RESOURCE_STATES targetState)
+{
+    if (commandList == nullptr || source == nullptr || target == nullptr || sourceRoi.width == 0 ||
+        sourceRoi.height == 0 || sourceRoi.width != targetWidth || sourceRoi.height != targetHeight)
+        return false;
+
+    const auto sourceDesc = source->GetDesc();
+    if (sourceRoi.left + sourceRoi.width > sourceDesc.Width || sourceRoi.top + sourceRoi.height > sourceDesc.Height)
+        return false;
+
+    ResourceBarrier(commandList, source, sourceState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    ResourceBarrier(commandList, target, targetState, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = source;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = target;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+    D3D12_BOX box { sourceRoi.left, sourceRoi.top, 0, sourceRoi.left + sourceRoi.width,
+                   sourceRoi.top + sourceRoi.height, 1 };
+    commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+
+    ResourceBarrier(commandList, target, D3D12_RESOURCE_STATE_COPY_DEST, targetState);
+    ResourceBarrier(commandList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, sourceState);
+    return true;
+}
+
+bool FSRFG_Dx12::CopyFull(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
+                          D3D12_RESOURCE_STATES sourceState, ID3D12Resource* target,
+                          D3D12_RESOURCE_STATES targetState)
+{
+    if (commandList == nullptr || source == nullptr || target == nullptr)
+        return false;
+
+    const auto sourceDesc = source->GetDesc();
+    const auto targetDesc = target->GetDesc();
+    if (sourceDesc.Width != targetDesc.Width || sourceDesc.Height != targetDesc.Height ||
+        sourceDesc.Format != targetDesc.Format)
+        return false;
+
+    ResourceBarrier(commandList, source, sourceState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    ResourceBarrier(commandList, target, targetState, D3D12_RESOURCE_STATE_COPY_DEST);
+    commandList->CopyResource(target, source);
+    ResourceBarrier(commandList, target, D3D12_RESOURCE_STATE_COPY_DEST, targetState);
+    ResourceBarrier(commandList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, sourceState);
+    return true;
+}
+
+bool FSRFG_Dx12::PrepareLocalInputResources(int index, ID3D12GraphicsCommandList* commandList,
+                                            const FsrFgRoiRect& roi, UINT displayWidth, UINT displayHeight)
+{
+    if (!_roiContextActive || !roi.IsValid() || commandList == nullptr || displayWidth == 0 || displayHeight == 0)
+        return false;
+
+    auto depth = GetResource(FG_ResourceType::Depth, index);
+    auto velocity = GetResource(FG_ResourceType::Velocity, index);
+    if (!depth || !velocity || depth->GetResource() == nullptr || velocity->GetResource() == nullptr)
+        return false;
+
+    auto mapRect = [&](UINT sourceWidth, UINT sourceHeight) {
+        FsrFgRoiRect mapped {};
+        mapped.left = std::min(sourceWidth, (roi.left * sourceWidth) / displayWidth);
+        mapped.top = std::min(sourceHeight, (roi.top * sourceHeight) / displayHeight);
+        mapped.width = std::max<UINT>(1, (roi.width * sourceWidth + displayWidth - 1) / displayWidth);
+        mapped.height = std::max<UINT>(1, (roi.height * sourceHeight + displayHeight - 1) / displayHeight);
+        mapped.width = std::min(mapped.width, sourceWidth - mapped.left);
+        mapped.height = std::min(mapped.height, sourceHeight - mapped.top);
+        return mapped;
+    };
+
+    const auto depthDesc = depth->GetResource()->GetDesc();
+    const auto velocityDesc = velocity->GetResource()->GetDesc();
+    const auto depthRoi = mapRect(static_cast<UINT>(depthDesc.Width), depthDesc.Height);
+    const auto velocityRoi = mapRect(static_cast<UINT>(velocityDesc.Width), velocityDesc.Height);
+
+    if (!CreateRoiSurface(depth->GetResource(), depthRoi.width, depthRoi.height,
+                          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &_roiDepth[index], false) ||
+        !CreateRoiSurface(velocity->GetResource(), velocityRoi.width, velocityRoi.height,
+                          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &_roiVelocity[index], false))
+        return false;
+
+    if (!CopyRoi(commandList, depth->GetResource(), depth->state, depthRoi, _roiDepth[index], depthRoi.width,
+                 depthRoi.height, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) ||
+        !CopyRoi(commandList, velocity->GetResource(), velocity->state, velocityRoi, _roiVelocity[index],
+                 velocityRoi.width, velocityRoi.height, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
+        return false;
+
+    LOG_DEBUG("FSR FG local guides: frameSlot={} displayRoi=({},{} {}x{}) depthSource={:X} depthRoi=({},{} {}x{}) "
+              "mvSource={:X} mvRoi=({},{} {}x{})",
+              index, roi.left, roi.top, roi.width, roi.height, (size_t) depth->GetResource(), depthRoi.left,
+              depthRoi.top, depthRoi.width, depthRoi.height, (size_t) velocity->GetResource(), velocityRoi.left,
+              velocityRoi.top, velocityRoi.width, velocityRoi.height);
+
+    _roiRect[index] = roi;
+    return true;
+}
+
+void FSRFG_Dx12::ReleaseLocalResources()
+{
+    for (size_t i = 0; i < BUFFER_COUNT; ++i)
+    {
+        SAFE_RELEASE(_roiColor[i]);
+        SAFE_RELEASE(_roiPreviousColor[i]);
+        SAFE_RELEASE(_roiOutput[i]);
+        SAFE_RELEASE(_roiDepth[i]);
+        SAFE_RELEASE(_roiVelocity[i]);
+        SAFE_RELEASE(_roiRealColorHistory[i]);
+        _roiRealColorHistoryFrameId[i] = 0;
+        _roiRealColorHistoryValid[i] = false;
+        _roiRealColorHistoryRect[i] = {};
+        _roiRect[i] = {};
+    }
+
+    _roiProviderHistoryFrameId = 0;
+    _roiProviderHistoryRect = {};
+    _roiProviderHistoryValid = false;
+}
+
 static void fgLogCallback(uint32_t type, const wchar_t* message)
 {
     auto message_str = wstring_to_string(std::wstring(message));
@@ -312,7 +619,7 @@ static void fgLogCallback(uint32_t type, const wchar_t* message)
         spdlog::warn("FFX FG Callback: {}", message_str);
 }
 
-bool FSRFG_Dx12::Dispatch()
+bool FSRFG_Dx12::Dispatch(bool deferExecution)
 {
     LOG_FUNC();
 
@@ -355,7 +662,7 @@ bool FSRFG_Dx12::Dispatch()
 
     {
         auto distortion = GetResource(FG_ResourceType::Distortion, fIndex);
-        if (distortion && IsResourceReady(FG_ResourceType::Distortion, fIndex))
+        if (!_roiContextActive && distortion && IsResourceReady(FG_ResourceType::Distortion, fIndex))
         {
             LOG_TRACE("Using Distortion Field: {:X}", (size_t) distortion->GetResource());
 
@@ -374,7 +681,7 @@ bool FSRFG_Dx12::Dispatch()
     {
         auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
 
-        if (hudless && IsResourceReady(FG_ResourceType::HudlessColor, fIndex))
+        if (!_roiContextActive && hudless && IsResourceReady(FG_ResourceType::HudlessColor, fIndex))
         {
             LOG_TRACE("Using hudless: {:X}", (size_t) hudless->GetResource());
 
@@ -407,19 +714,7 @@ bool FSRFG_Dx12::Dispatch()
     }
 
     fgConfig.frameGenerationEnabled = _isActive;
-    fgConfig.flags = 0;
-
-    if (config->FGDebugView.value_or_default())
-        fgConfig.flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_VIEW;
-
-    if (config->FGDebugTearLines.value_or_default())
-        fgConfig.flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_TEAR_LINES;
-
-    if (config->FGDebugResetLines.value_or_default())
-        fgConfig.flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_RESET_INDICATORS;
-
-    if (config->FGDebugPacingLines.value_or_default())
-        fgConfig.flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_PACING_LINES;
+    fgConfig.flags = GetFrameGenerationFlags();
 
     fgConfig.allowAsyncWorkloads = config->FGAsync.value_or_default();
 
@@ -446,6 +741,16 @@ bool FSRFG_Dx12::Dispatch()
         fgConfig.generationRect.top = config->FGRectTop.value_or(_interpolationTop[fIndex].value_or(defaultTop));
         fgConfig.generationRect.width = config->FGRectWidth.value_or(defaultWidth);
         fgConfig.generationRect.height = config->FGRectHeight.value_or(defaultHeight);
+
+        if (_roiContextActive)
+        {
+            const auto roi = ResolveRoi(fIndex, static_cast<UINT>(bufferWidth), static_cast<UINT>(bufferHeight));
+            _roiRect[fIndex] = roi;
+            fgConfig.generationRect.left = roi.left;
+            fgConfig.generationRect.top = roi.top;
+            fgConfig.generationRect.width = roi.width;
+            fgConfig.generationRect.height = roi.height;
+        }
     }
 
     fgConfig.frameGenerationCallbackUserContext = this;
@@ -478,34 +783,6 @@ bool FSRFG_Dx12::Dispatch()
     bool dispatchResult = false;
     if (retCode == FFX_API_RETURN_OK && _isActive)
     {
-        ffxCreateBackendDX12Desc backendDesc {};
-        backendDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
-        backendDesc.device = _device;
-
-        ffxDispatchDescFrameGenerationPrepareCameraInfo dfgCameraData {};
-        dfgCameraData.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_CAMERAINFO;
-        dfgCameraData.header.pNext = &backendDesc.header;
-
-        std::memcpy(dfgCameraData.cameraPosition, _cameraPosition[fIndex], 3 * sizeof(float));
-        std::memcpy(dfgCameraData.cameraUp, _cameraUp[fIndex], 3 * sizeof(float));
-        std::memcpy(dfgCameraData.cameraRight, _cameraRight[fIndex], 3 * sizeof(float));
-        std::memcpy(dfgCameraData.cameraForward, _cameraForward[fIndex], 3 * sizeof(float));
-
-        ffxDispatchDescFrameGenerationPrepare dfgPrepare {};
-        dfgPrepare.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE;
-
-        // Hacky way but should do
-        const float* cameraDataRaw = dfgCameraData.cameraPosition;
-        bool cameraDataIsZeroed = std::all_of(cameraDataRaw, cameraDataRaw + 12, [](float v) { return v == 0.0f; });
-
-        // Don't link the camera struct if it's just all zeros
-        // Specifically the driver upgrade dll is looking at this and falling back to FSR 3 FG
-        if (cameraDataIsZeroed)
-            dfgPrepare.header.pNext = &backendDesc.header;
-        else
-            dfgPrepare.header.pNext = &dfgCameraData.header;
-
-        // Prepare command list
         auto allocator = _fgCommandAllocator[fIndex];
         auto result = allocator->Reset();
         if (result != S_OK)
@@ -517,75 +794,26 @@ bool FSRFG_Dx12::Dispatch()
         result = _fgCommandList[fIndex]->Reset(allocator, nullptr);
         if (result != S_OK)
         {
-            LOG_ERROR("_hudlessCommandList[fIndex]->Reset error: {:X}", (UINT) result);
+            LOG_ERROR("_fgCommandList[fIndex]->Reset error: {:X}", (UINT) result);
             return false;
         }
 
-        dfgPrepare.commandList = _fgCommandList[fIndex];
-        dfgPrepare.frameID = willDispatchFrame;
-        dfgPrepare.flags = fgConfig.flags;
-
-        {
-            auto velocity = GetResource(FG_ResourceType::Velocity, fIndex);
-            if (velocity && IsResourceReady(FG_ResourceType::Velocity, fIndex))
-            {
-                LOG_DEBUG("Velocity resource: {:X}", (size_t) velocity->GetResource());
-                dfgPrepare.motionVectors =
-                    ffxApiGetResourceDX12(velocity->GetResource(), GetFfxApiState(velocity->state));
-            }
-            else
-            {
-                LOG_ERROR("Velocity is missing");
-                _fgCommandList[fIndex]->Close();
-                return false;
-            }
-        }
-
-        {
-            auto depth = GetResource(FG_ResourceType::Depth, fIndex);
-
-            if (depth && IsResourceReady(FG_ResourceType::Depth, fIndex))
-            {
-                LOG_DEBUG("Depth resource: {:X}", (size_t) depth->GetResource());
-                dfgPrepare.depth = ffxApiGetResourceDX12(depth->GetResource(), GetFfxApiState(depth->state));
-            }
-            else
-            {
-                LOG_ERROR("Depth is missing");
-                _fgCommandList[fIndex]->Close();
-                return false;
-            }
-
-            if (state.currentFeature && state.activeFgInput == FGInput::Upscaler)
-                dfgPrepare.renderSize = { state.currentFeature->RenderWidth(), state.currentFeature->RenderHeight() };
-            else if (depth)
-                dfgPrepare.renderSize = { static_cast<uint32_t>(depth->width), depth->height };
-            else
-                dfgPrepare.renderSize = { dfgPrepare.depth.description.width, dfgPrepare.depth.description.height };
-        }
-
-        dfgPrepare.jitterOffset.x = _jitterX[fIndex];
-        dfgPrepare.jitterOffset.y = _jitterY[fIndex];
-        dfgPrepare.motionVectorScale.x = _mvScaleX[fIndex];
-        dfgPrepare.motionVectorScale.y = _mvScaleY[fIndex];
-        dfgPrepare.cameraFar = _cameraFar[fIndex];
-        dfgPrepare.cameraNear = _cameraNear[fIndex];
-        dfgPrepare.cameraFovAngleVertical = _cameraVFov[fIndex];
-
-        dfgPrepare.frameTimeDelta = config->FTInput.value_or_default() == FrameTimeSource::Input
-                                        ? (float) _ftDelta[fIndex]
-                                        : static_cast<float>(state.lastFGFrameTime);
-
-        dfgPrepare.viewSpaceToMetersFactor = _meterFactor[fIndex];
-
-        retCode = FfxApiProxy::D3D12_Dispatch(&_fgContext, &dfgPrepare.header);
-        LOG_DEBUG("D3D12_Dispatch result: {0}, frame: {1}, fIndex: {2}, commandList: {3:X}", retCode, willDispatchFrame,
-                  fIndex, (size_t) dfgPrepare.commandList);
-
-        if (retCode == FFX_API_RETURN_OK)
+        const auto lockedRoi = _roiContextActive ? &_roiRect[fIndex] : nullptr;
+        if (!RecordPrepare(fIndex, willDispatchFrame, _fgCommandList[fIndex], fgConfig.flags, lockedRoi))
         {
             _fgCommandList[fIndex]->Close();
-            _waitingExecute[fIndex] = true;
+            return false;
+        }
+
+        _fgCommandList[fIndex]->Close();
+        _waitingExecute[fIndex] = true;
+        if (deferExecution)
+        {
+            _deferredPrepareIndex = fIndex;
+            dispatchResult = true;
+        }
+        else
+        {
             dispatchResult = ExecuteCommandList(fIndex);
         }
     }
@@ -633,6 +861,216 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
     {
         LOG_WARN("Dispatched with the same frame id! frameID: {}", params->frameID);
         params->numGeneratedFrames = 0;
+        return FFX_API_RETURN_OK;
+    }
+
+    if (_roiContextActive)
+    {
+        const auto roi = _roiRect[fIndex].IsValid()
+                             ? _roiRect[fIndex]
+                             : ResolveRoi(fIndex, _physicalDisplayWidth, _physicalDisplayHeight);
+        auto* commandList = static_cast<ID3D12GraphicsCommandList*>(params->commandList);
+        auto* physicalOutput = static_cast<ID3D12Resource*>(params->outputs[0].resource);
+        auto* presentColor = static_cast<ID3D12Resource*>(params->presentColor.resource);
+        const auto presentState = GetD3D12State((FfxApiResourceState) params->presentColor.state);
+        const auto outputState = GetD3D12State((FfxApiResourceState) params->outputs[0].state);
+        uint32_t timingSlot = 0;
+        const bool timingActive = Config::Instance()->GazeRoiGpuTiming.value_or_default() && commandList != nullptr &&
+                                  GazeRoiFrameSync::Acquire(commandList, timingSlot) &&
+                                  GazeRoiFrameSync::BeginGpuTiming(_device, commandList, timingSlot, 1);
+        if (timingActive)
+            GazeRoiFrameSync::WriteGpuTimestamp(commandList, timingSlot, 0);
+
+        const bool placeholderReady = commandList != nullptr && physicalOutput != nullptr && presentColor != nullptr &&
+                                      (physicalOutput == presentColor ||
+                                       CopyFull(commandList, presentColor, presentState, physicalOutput, outputState));
+
+        if (timingActive)
+            GazeRoiFrameSync::WriteGpuTimestamp(commandList, timingSlot, 1);
+
+        if (!roi.IsValid() || commandList == nullptr || physicalOutput == nullptr || presentColor == nullptr ||
+            !placeholderReady ||
+            !CreateRoiSurface(presentColor, roi.width, roi.height, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                              &_roiColor[fIndex], false) ||
+            !CreateRoiSurface(physicalOutput, roi.width, roi.height, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                              &_roiOutput[fIndex], true))
+        {
+            LOG_WARN("FSR FG local ROI resources unavailable; using provider fallback for frame {}", params->frameID);
+        }
+        else
+        {
+            const auto presentDesc = presentColor->GetDesc();
+            const auto outputDesc = physicalOutput->GetDesc();
+            FsrFgRoiRect colorRoi = roi;
+            colorRoi.left = std::min<UINT>(roi.left, static_cast<UINT>(presentDesc.Width));
+            colorRoi.top = std::min<UINT>(roi.top, presentDesc.Height);
+            colorRoi.width = std::min<UINT>(roi.width, static_cast<UINT>(presentDesc.Width) - colorRoi.left);
+            colorRoi.height = std::min<UINT>(roi.height, presentDesc.Height - colorRoi.top);
+
+            if (colorRoi.width != roi.width || colorRoi.height != roi.height ||
+                outputDesc.Width != presentDesc.Width || outputDesc.Height != presentDesc.Height ||
+                outputDesc.Format != presentDesc.Format)
+            {
+                LOG_WARN("FSR FG local ROI resource contract mismatch; disabling local dispatch for frame {}",
+                         params->frameID);
+            }
+            else if (!CopyRoi(commandList, presentColor, presentState, colorRoi, _roiColor[fIndex], roi.width,
+                              roi.height, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
+            {
+                LOG_WARN("FSR FG local color crop failed; disabling local dispatch for frame {}", params->frameID);
+            }
+            else
+            {
+                if (timingActive)
+                    GazeRoiFrameSync::WriteGpuTimestamp(commandList, timingSlot, 2);
+
+                int previousHistoryIndex = -1;
+                for (int i = 0; i < BUFFER_COUNT; ++i)
+                {
+                    if (_roiRealColorHistoryValid[i] &&
+                        _roiRealColorHistoryFrameId[i] + 1 == params->frameID)
+                    {
+                        previousHistoryIndex = i;
+                        break;
+                    }
+                }
+
+                const bool providerHistoryMatches =
+                    _roiProviderHistoryValid && _roiProviderHistoryFrameId + 1 == params->frameID &&
+                    _roiProviderHistoryRect.left == roi.left && _roiProviderHistoryRect.top == roi.top &&
+                    _roiProviderHistoryRect.width == roi.width && _roiProviderHistoryRect.height == roi.height;
+
+                bool previousCropReady = false;
+                if (!providerHistoryMatches && previousHistoryIndex >= 0 &&
+                    CreateRoiSurface(_roiRealColorHistory[previousHistoryIndex], roi.width, roi.height,
+                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &_roiPreviousColor[fIndex],
+                                     false))
+                {
+                    previousCropReady = CopyRoi(
+                        commandList, _roiRealColorHistory[previousHistoryIndex],
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, roi, _roiPreviousColor[fIndex], roi.width,
+                        roi.height, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                }
+
+                if (timingActive)
+                    GazeRoiFrameSync::WriteGpuTimestamp(commandList, timingSlot, 3);
+
+                // Capture the complete real current frame before composition. presentColor can alias physicalOutput,
+                // in which case the ROI is overwritten with the generated image later in this command list.
+                const bool currentHistoryReady =
+                    CreateRoiSurface(presentColor, static_cast<UINT>(presentDesc.Width), presentDesc.Height,
+                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                     &_roiRealColorHistory[fIndex], false) &&
+                    CopyFull(commandList, presentColor, presentState, _roiRealColorHistory[fIndex],
+                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                if (currentHistoryReady)
+                {
+                    _roiRealColorHistoryFrameId[fIndex] = params->frameID;
+                    _roiRealColorHistoryRect[fIndex] = roi;
+                    _roiRealColorHistoryValid[fIndex] = true;
+                }
+                else
+                {
+                    _roiRealColorHistoryValid[fIndex] = false;
+                    LOG_WARN("FSR FG failed to retain complete real frame {} for moving ROI history",
+                             params->frameID);
+                }
+
+                if (timingActive)
+                    GazeRoiFrameSync::WriteGpuTimestamp(commandList, timingSlot, 4);
+
+                // The physical output is deliberately initialized with the current complete image. The local
+                // generated result overwrites only R_FG below; this is the phase-one peripheral placeholder.
+                LOG_DEBUG("FSR FG local provider route=local-context frame={} display={}x{} "
+                          "providerHistoryMatches={} previousRealFrame={} periphery=external-current-image-placeholder",
+                          params->frameID, roi.width, roi.height, providerHistoryMatches, previousCropReady);
+                ffxDispatchDescFrameGeneration localParams = *params;
+                localParams.presentColor =
+                    ffxApiGetResourceDX12(_roiColor[fIndex], FFX_API_RESOURCE_STATE_COMPUTE_READ);
+                localParams.outputs[0] =
+                    ffxApiGetResourceDX12(_roiOutput[fIndex], FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+                localParams.generationRect = { 0, 0, static_cast<int32_t>(roi.width), static_cast<int32_t>(roi.height) };
+
+                bool providerHistoryReady = providerHistoryMatches;
+                if (timingActive)
+                    GazeRoiFrameSync::SetGpuTimingPrime(commandList, timingSlot, !providerHistoryMatches && previousCropReady);
+                if (!providerHistoryMatches && previousCropReady)
+                {
+                    ffxDispatchDescFrameGeneration historyParams = localParams;
+                    historyParams.presentColor =
+                        ffxApiGetResourceDX12(_roiPreviousColor[fIndex], FFX_API_RESOURCE_STATE_COMPUTE_READ);
+                    historyParams.reset = 1;
+
+                    const auto historyResult = FfxApiProxy::D3D12_Dispatch(&_fgContext, &historyParams.header);
+                    providerHistoryReady = historyResult == FFX_API_RETURN_OK;
+                    LOG_DEBUG("FSR FG moving ROI history prime: frame={} previousFrame={} rect=({},{} {}x{}) result={:X}",
+                              params->frameID, params->frameID - 1, roi.left, roi.top, roi.width, roi.height,
+                              (UINT) historyResult);
+                }
+
+                if (!providerHistoryReady)
+                {
+                    localParams.reset = 1;
+                    LOG_DEBUG("FSR FG local history unavailable; forcing current-frame fallback for frame {}",
+                              params->frameID);
+                }
+
+                if (timingActive)
+                    GazeRoiFrameSync::WriteGpuTimestamp(commandList, timingSlot, 5);
+
+                const auto localResult = FfxApiProxy::D3D12_Dispatch(&_fgContext, &localParams.header);
+                if (timingActive)
+                    GazeRoiFrameSync::WriteGpuTimestamp(commandList, timingSlot, 6);
+                if (localResult == FFX_API_RETURN_OK)
+                {
+                    _roiProviderHistoryFrameId = params->frameID;
+                    _roiProviderHistoryRect = roi;
+                    _roiProviderHistoryValid = true;
+
+                    ResourceBarrier(commandList, _roiOutput[fIndex], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    ResourceBarrier(commandList, physicalOutput, outputState, D3D12_RESOURCE_STATE_COPY_DEST);
+
+                    D3D12_TEXTURE_COPY_LOCATION src {};
+                    src.pResource = _roiOutput[fIndex];
+                    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    src.SubresourceIndex = 0;
+                    D3D12_TEXTURE_COPY_LOCATION dst {};
+                    dst.pResource = physicalOutput;
+                    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    dst.SubresourceIndex = 0;
+                    D3D12_BOX localBox { 0, 0, 0, roi.width, roi.height, 1 };
+                    commandList->CopyTextureRegion(&dst, roi.left, roi.top, 0, &src, &localBox);
+
+                    if (timingActive)
+                        GazeRoiFrameSync::WriteGpuTimestamp(commandList, timingSlot, 7);
+                    if (timingActive)
+                        GazeRoiFrameSync::ResolveGpuTiming(commandList, timingSlot);
+
+                    ResourceBarrier(commandList, physicalOutput, D3D12_RESOURCE_STATE_COPY_DEST, outputState);
+                    ResourceBarrier(commandList, _roiOutput[fIndex], D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                    LOG_DEBUG("FSR FG local ROI dispatch: frame {}, rect=({},{} {}x{})", params->frameID,
+                              roi.left, roi.top, roi.width, roi.height);
+                    _lastFrameId = params->frameID;
+                    return localResult;
+                }
+
+                LOG_WARN("FSR FG local dispatch failed ({:X}); returning provider error", (UINT) localResult);
+                _roiProviderHistoryValid = false;
+                _lastFrameId = params->frameID;
+                return localResult;
+            }
+        }
+    }
+
+    if (_roiContextActive)
+    {
+        // A local context cannot safely consume physical-display resources. Do
+        // not fall through to the stock dispatch with mismatched dimensions.
+        params->numGeneratedFrames = 0;
+        _lastFrameId = params->frameID;
         return FFX_API_RETURN_OK;
     }
 
@@ -1084,18 +1522,45 @@ void FSRFG_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants)
     DXGI_SWAP_CHAIN_DESC desc {};
     if (State::Instance().currentSwapchain->GetDesc(&desc) == S_OK)
     {
-        createFg.displaySize = { desc.BufferDesc.Width, desc.BufferDesc.Height };
+        _physicalDisplayWidth = desc.BufferDesc.Width;
+        _physicalDisplayHeight = desc.BufferDesc.Height;
 
-        if (fgConstants.displayWidth != 0 && fgConstants.displayHeight != 0)
-            createFg.maxRenderSize = { fgConstants.displayWidth, fgConstants.displayHeight };
+        _roiContextActive = Config::Instance()->FSRFGROIEnabled.value_or_default();
+        if (_roiContextActive)
+        {
+            const auto roi = ResolveRoi(0, _physicalDisplayWidth, _physicalDisplayHeight);
+            createFg.displaySize = { roi.width, roi.height };
+            const auto currentFeature = State::Instance().currentFeature;
+            const auto renderWidth = currentFeature != nullptr && currentFeature->RenderWidth() != 0
+                                         ? currentFeature->RenderWidth()
+                                         : _physicalDisplayWidth;
+            const auto renderHeight = currentFeature != nullptr && currentFeature->RenderHeight() != 0
+                                          ? currentFeature->RenderHeight()
+                                          : _physicalDisplayHeight;
+            createFg.maxRenderSize = {
+                std::max<UINT>(1, (roi.width * renderWidth + _physicalDisplayWidth - 1) / _physicalDisplayWidth),
+                std::max<UINT>(1, (roi.height * renderHeight + _physicalDisplayHeight - 1) / _physicalDisplayHeight) };
+            LOG_INFO("FSR FG local ROI context: {}x{} (physical {}x{})", roi.width, roi.height,
+                     _physicalDisplayWidth, _physicalDisplayHeight);
+        }
         else
-            createFg.maxRenderSize = { desc.BufferDesc.Width, desc.BufferDesc.Height };
+        {
+            createFg.displaySize = { _physicalDisplayWidth, _physicalDisplayHeight };
+
+            if (fgConstants.displayWidth != 0 && fgConstants.displayHeight != 0)
+                createFg.maxRenderSize = { fgConstants.displayWidth, fgConstants.displayHeight };
+            else
+                createFg.maxRenderSize = { _physicalDisplayWidth, _physicalDisplayHeight };
+        }
     }
     else
     {
         // this might cause issues
         createFg.displaySize = { fgConstants.displayWidth, fgConstants.displayHeight };
         createFg.maxRenderSize = { fgConstants.displayWidth, fgConstants.displayHeight };
+        _physicalDisplayWidth = createFg.displaySize.width;
+        _physicalDisplayHeight = createFg.displaySize.height;
+        _roiContextActive = false;
     }
 
     _maxRenderWidth = createFg.maxRenderSize.width;
@@ -1271,7 +1736,7 @@ void FSRFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
         State::Instance().scChanged = true;
     }
 
-    if (_maxRenderWidth != 0 && _maxRenderHeight != 0 && IsActive() && !IsPaused() &&
+    if (!_roiContextActive && _maxRenderWidth != 0 && _maxRenderHeight != 0 && IsActive() && !IsPaused() &&
         (fgConstants.displayWidth > _maxRenderWidth || fgConstants.displayHeight > _maxRenderHeight))
 
     {
@@ -1336,6 +1801,8 @@ void FSRFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
 
 void FSRFG_Dx12::ReleaseObjects()
 {
+    ReleaseLocalResources();
+
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
         SAFE_RELEASE(_fgCommandAllocator[i]);
@@ -1720,40 +2187,74 @@ bool FSRFG_Dx12::Present()
         }
     }
 
-    bool result = false;
+    const bool shouldPause = (_fgFramePresentId - _lastFGFramePresentId) > 3 && IsActive() && !_waitingNewFrameData;
+    const bool batchPrepare = !shouldPause && _roiContextActive &&
+                              Config::Instance()->FSRFGROIBatchPrepare.value_or_default();
+    _deferredPrepareIndex = -1;
+    const bool prepareResult = batchPrepare ? Dispatch(true) : false;
 
     // if (IsActive() && !IsPaused())
     {
+        ID3D12CommandList* batchedLists[3] {};
+        UINT batchedListCount = 0;
+        bool signalUiFence = false;
+
         if (_uiCommandListResetted[fIndex])
         {
-            LOG_DEBUG("Executing _uiCommandList[{}]: {:X}", fIndex, (size_t) _uiCommandList[fIndex]);
+            LOG_DEBUG("Closing _uiCommandList[{}]: {:X}", fIndex, (size_t) _uiCommandList[fIndex]);
             auto closeResult = _uiCommandList[fIndex]->Close();
 
             if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
+            {
+                if (batchPrepare && prepareResult)
+                    batchedLists[batchedListCount++] = _uiCommandList[fIndex];
+                else
+                    _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
+            }
             else
                 LOG_ERROR("_uiCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
 
-            _gameCommandQueue->Signal(_uiFence, _uiAllocatorFenceValues[fIndex]);
-
+            signalUiFence = true;
             _uiCommandListResetted[fIndex] = false;
         }
 
         if (_scCommandListResetted[fIndex])
         {
-            LOG_DEBUG("Executing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
+            LOG_DEBUG("Closing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
             auto closeResult = _scCommandList[fIndex]->Close();
 
             if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
+            {
+                if (batchPrepare && prepareResult)
+                    batchedLists[batchedListCount++] = _scCommandList[fIndex];
+                else
+                    _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
+            }
             else
                 LOG_ERROR("_scCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
 
             _scCommandListResetted[fIndex] = false;
         }
+
+        if (batchPrepare && prepareResult && _deferredPrepareIndex >= 0 &&
+            _deferredPrepareIndex < BUFFER_COUNT && _waitingExecute[_deferredPrepareIndex])
+        {
+            batchedLists[batchedListCount++] = _fgCommandList[_deferredPrepareIndex];
+        }
+
+        if (batchedListCount > 0)
+        {
+            LOG_DEBUG("Executing {} batched callback/UI/Prepare command lists", batchedListCount);
+            _gameCommandQueue->ExecuteCommandLists(batchedListCount, batchedLists);
+            if (_deferredPrepareIndex >= 0)
+                SetExecuted(_deferredPrepareIndex);
+        }
+
+        if (signalUiFence)
+            _gameCommandQueue->Signal(_uiFence, _uiAllocatorFenceValues[fIndex]);
     }
 
-    if ((_fgFramePresentId - _lastFGFramePresentId) > 3 && IsActive() && !_waitingNewFrameData)
+    if (shouldPause)
     {
         LOG_DEBUG("Pausing FG");
         Deactivate();
@@ -1763,5 +2264,5 @@ bool FSRFG_Dx12::Present()
 
     _fgFramePresentId++;
 
-    return Dispatch();
+    return batchPrepare ? prepareResult : Dispatch();
 }
