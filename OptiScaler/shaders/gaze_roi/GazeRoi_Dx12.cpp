@@ -1531,6 +1531,7 @@ void EvaluateJointPeripheral(float2 sampleCenter, int2 tileOrigin, out float4 cu
     float3 weightedSquareSum = 0.0f;
     float reconstructionTotal = 0.0f;
     float statisticsTotal = 0.0f;
+    const float currentPreExposure = CurrentPeripheralPreExposure();
     const float3 reconstructionDistanceX = float3(-1.0f, 0.0f, 1.0f) - subpixelOffset.x;
     const float3 reconstructionDistanceY = float3(-1.0f, 0.0f, 1.0f) - subpixelOffset.y;
     const float3 reconstructionWeightX =
@@ -1539,7 +1540,7 @@ void EvaluateJointPeripheral(float2 sampleCenter, int2 tileOrigin, out float4 cu
         exp(-reconstructionSharpness * reconstructionDistanceY * reconstructionDistanceY);
     const float statisticsEdgeWeight = 0.47236655f; // exp(-0.75)
     const float3 statisticsWeightAxis = float3(statisticsEdgeWeight, 1.0f, statisticsEdgeWeight);
-    const float inversePreExposure = 1.0f / CurrentPeripheralPreExposure();
+    const float inversePreExposure = 1.0f / currentPreExposure;
     [unroll]
     for (int y = -1; y <= 1; ++y)
     {
@@ -1675,6 +1676,7 @@ void EvaluateLightweightPeripheral(float2 sampleCenter, bool allowConfiguredBlur
     float3 weightedSquareSum = 0.0f;
     float reconstructionTotal = 0.0f;
     float statisticsTotal = 0.0f;
+    const float currentPreExposure = CurrentPeripheralPreExposure();
     [unroll]
     for (int y = -1; y <= 1; y++)
     {
@@ -1690,7 +1692,7 @@ void EvaluateLightweightPeripheral(float2 sampleCenter, bool allowConfiguredBlur
             // bounded luminance/chroma domain so HDR highlights cannot make
             // the history box or change rejection explode.
             const float statisticsWeight = exp(-0.75f * dot(offset, offset));
-            const float3 workingColor = RgbToYCoCg(TemporalCompress(sampleColor.rgb));
+            const float3 workingColor = RgbToYCoCg(TemporalCompress(sampleColor.rgb / currentPreExposure));
             weightedColor += sampleColor * reconstructionWeight;
             reconstructionTotal += reconstructionWeight;
             weightedSum += workingColor * statisticsWeight;

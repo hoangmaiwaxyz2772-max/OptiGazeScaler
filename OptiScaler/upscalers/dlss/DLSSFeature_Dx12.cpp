@@ -444,9 +444,13 @@ bool RectsOverlap(const GazeRoiRect& a, const GazeRoiRect& b)
            static_cast<uint64_t>(b.y) < static_cast<uint64_t>(a.y) + a.height;
 }
 
-static uint32_t AlignUp(uint32_t value, uint32_t alignment)
+static uint32_t ScaleRoiDimension(uint32_t outputSize, uint32_t renderExtent, uint32_t targetExtent)
 {
-    return alignment == 0 ? value : ((value + alignment - 1) / alignment) * alignment;
+    if (targetExtent == 0)
+        return 0;
+
+    const uint64_t scaled = static_cast<uint64_t>(outputSize) * renderExtent;
+    return static_cast<uint32_t>((scaled + targetExtent / 2) / targetExtent);
 }
 
 static uint32_t MapCenteredRectOrigin(uint32_t sourceOrigin, uint32_t sourceSize, uint32_t sourceExtent,
@@ -1284,8 +1288,6 @@ bool DLSSFeatureDx12::BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& in
     if (targetWidth == 0 || targetHeight == 0 || renderWidth == 0 || renderHeight == 0)
         return false;
 
-    const float scaleX = static_cast<float>(renderWidth) / static_cast<float>(targetWidth);
-    const float scaleY = static_cast<float>(renderHeight) / static_cast<float>(targetHeight);
     const auto clampConfiguredDimension = [](int configured, uint32_t target) -> uint32_t
     {
         if (target == 0)
@@ -1311,10 +1313,8 @@ bool DLSSFeatureDx12::BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& in
     outputRect.y = static_cast<uint32_t>(
         std::clamp(centeredOutputY, 0, static_cast<int32_t>(targetHeight - outputRect.height)));
 
-    inputRect.width =
-        std::max<uint32_t>(16, AlignUp(static_cast<uint32_t>(std::round(desiredOutputWidth * scaleX)), 8));
-    inputRect.height =
-        std::max<uint32_t>(16, AlignUp(static_cast<uint32_t>(std::round(desiredOutputHeight * scaleY)), 8));
+    inputRect.width = std::max<uint32_t>(16, ScaleRoiDimension(desiredOutputWidth, renderWidth, targetWidth));
+    inputRect.height = std::max<uint32_t>(16, ScaleRoiDimension(desiredOutputHeight, renderHeight, targetHeight));
     inputRect.width = std::min(inputRect.width, renderWidth);
     inputRect.height = std::min(inputRect.height, renderHeight);
 
