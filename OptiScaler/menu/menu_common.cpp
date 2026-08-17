@@ -3277,14 +3277,17 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             {
                 config->FGDrawUIOverFG = drawUIOverFG;
             }
-            ShowHelpMarker("Draws UI resource over the final image\n"
-                           "If no UI visible, enable this!");
+            ShowHelpMarker("Draws UI resource over the final image.\n"
+                           "FSR uses its swapchain UI composition while this is disabled; enable it to use the "
+                           "OptiScaler composition fallback.");
 
             ImGui::EndDisabled();
 
             ImGui::SameLine(0.0f, 16.0f);
 
-            ImGui::BeginDisabled(!isUsingUIAny || !config->FGDrawUIOverFG.value_or_default());
+            const bool fsrProviderComposesUI = state.activeFgOutput == FGOutput::FSRFG;
+            ImGui::BeginDisabled(!isUsingUIAny ||
+                                 (!config->FGDrawUIOverFG.value_or_default() && !fsrProviderComposesUI));
 
             if (bool uiPremultipliedAlpha = config->FGUIPremultipliedAlpha.value_or_default();
                 ImGui::Checkbox("UI Premult. alpha", &uiPremultipliedAlpha))
@@ -3577,6 +3580,14 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             }
             ShowHelpMarker("Runs FSR frame generation in a fixed-size region centered on gaze");
 
+            if (fsrFgRoiEnabled)
+            {
+                const auto fsrFgOutput = reinterpret_cast<IFGFeature_Dx12*>(state.currentFG);
+                const bool roiHudlessActive = fsrFgOutput != nullptr && fsrFgOutput->IsLocalRoiHudlessActive();
+                ImGui::SameLine(0.0f, 16.0f);
+                ImGui::TextDisabled("HUD-less: %s", roiHudlessActive ? "active" : "waiting for OptiFG capture");
+            }
+
             ImGui::BeginDisabled(!fsrFgRoiEnabled);
             ImGui::PushItemWidth(105.0f * menuResScale);
             int fsrFgRoiWidth = config->FSRFGROIWidthPx.value_or_default();
@@ -3659,8 +3670,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                         const auto drawGroup = [&drawMetric](const char* group,
                                                               const GazeRoiFrameSync::TimingGroupStats& stats) {
                             drawMetric((std::string(group) + " placeholder").c_str(), stats.placeholder);
-                            drawMetric((std::string(group) + " prev ROI crop").c_str(), stats.previousRoiCrop);
-                            drawMetric((std::string(group) + " full history save").c_str(), stats.fullHistorySave);
+                            drawMetric((std::string(group) + " ROI history crops").c_str(), stats.previousRoiCrop);
+                            drawMetric((std::string(group) + " full histories save").c_str(), stats.fullHistorySave);
                             drawMetric((std::string(group) + " color crop").c_str(), stats.colorCrop);
                             drawMetric((std::string(group) + " history prime").c_str(), stats.historyPrime);
                             drawMetric((std::string(group) + " provider").c_str(), stats.provider);

@@ -52,14 +52,22 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     ID3D12Resource* _roiOutput[BUFFER_COUNT] {};
     ID3D12Resource* _roiDepth[BUFFER_COUNT] {};
     ID3D12Resource* _roiVelocity[BUFFER_COUNT] {};
+    ID3D12Resource* _roiHudless[BUFFER_COUNT] {};
+    ID3D12Resource* _roiPreviousHudless[BUFFER_COUNT] {};
     ID3D12Resource* _roiRealColorHistory[BUFFER_COUNT] {};
+    ID3D12Resource* _roiRealHudlessHistory[BUFFER_COUNT] {};
     UINT64 _roiRealColorHistoryFrameId[BUFFER_COUNT] {};
     bool _roiRealColorHistoryValid[BUFFER_COUNT] {};
+    UINT64 _roiRealHudlessHistoryFrameId[BUFFER_COUNT] {};
+    bool _roiRealHudlessHistoryValid[BUFFER_COUNT] {};
     FsrFgRoiRect _roiRealColorHistoryRect[BUFFER_COUNT] {};
     FsrFgRoiRect _roiRect[BUFFER_COUNT] {};
     UINT64 _roiProviderHistoryFrameId = 0;
     FsrFgRoiRect _roiProviderHistoryRect {};
     bool _roiProviderHistoryValid = false;
+    bool _roiProviderHistoryUsedHudless = false;
+    bool _roiHudlessActivationLogged = false;
+    bool _roiHudlessActive = false;
     bool _roiContextActive = false;
     UINT _physicalDisplayWidth = 0;
     UINT _physicalDisplayHeight = 0;
@@ -96,6 +104,8 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 
     bool ExecuteCommandList(int index);
     bool Dispatch(bool deferExecution = false);
+    static ffxReturnCode_t FrameGenerationCallback(ffxDispatchDescFrameGeneration* params, void* userContext);
+    bool ConfigureLocalHudless(ID3D12Resource* hudless, UINT64 frameId);
     uint32_t GetFrameGenerationFlags() const;
     bool RecordPrepare(int index, UINT64 frameId, ID3D12GraphicsCommandList* commandList, uint32_t flags,
                        const FsrFgRoiRect* lockedRoi = nullptr);
@@ -169,6 +179,7 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     void SetCommandQueue(FG_ResourceType type, ID3D12CommandQueue* queue) override final;
     bool IsLocalRoiContext() const override final;
     bool UseLocalRoiStagingBypass() const override final;
+    bool IsLocalRoiHudlessActive() const override final;
 
     ffxReturnCode_t DispatchCallback(ffxDispatchDescFrameGeneration* params);
 

@@ -127,6 +127,9 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     // the normal staging contract.
     virtual bool UseLocalRoiStagingBypass() const { return false; }
 
+    // Reports actual local-provider consumption, not merely whether HUD fix is enabled.
+    virtual bool IsLocalRoiHudlessActive() const { return false; }
+
     ID3D12GraphicsCommandList* GetUICommandList(int index = -1);
     ID3D12GraphicsCommandList* GetSCCommandList(int index = -1);
 

@@ -312,6 +312,11 @@ bool FSRFG_Dx12::UseLocalRoiStagingBypass() const
     return _roiContextActive && Config::Instance()->FSRFGROIStagingBypass.value_or_default();
 }
 
+bool FSRFG_Dx12::IsLocalRoiHudlessActive() const
+{
+    return _roiContextActive && _roiHudlessActive;
+}
+
 uint32_t FSRFG_Dx12::GetFrameGenerationFlags() const
 {
     const auto config = Config::Instance();
@@ -327,6 +332,53 @@ uint32_t FSRFG_Dx12::GetFrameGenerationFlags() const
         flags |= FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_PACING_LINES;
 
     return flags;
+}
+
+ffxReturnCode_t FSRFG_Dx12::FrameGenerationCallback(ffxDispatchDescFrameGeneration* params, void* userContext)
+{
+    if (userContext == nullptr)
+        return FFX_API_RETURN_ERROR;
+
+    return static_cast<FSRFG_Dx12*>(userContext)->DispatchCallback(params);
+}
+
+bool FSRFG_Dx12::ConfigureLocalHudless(ID3D12Resource* hudless, UINT64 frameId)
+{
+    if (_fgContext == nullptr)
+        return false;
+
+    ffxConfigureDescFrameGeneration config {};
+    config.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+    config.frameGenerationEnabled = true;
+    config.flags = GetFrameGenerationFlags() | FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
+    config.frameGenerationCallback = &FSRFG_Dx12::FrameGenerationCallback;
+    config.frameGenerationCallbackUserContext = this;
+    config.onlyPresentGenerated = State::Instance().fgOnlyGenerated;
+    config.swapChain = _swapChain;
+    config.frameID = frameId;
+
+    if (hudless != nullptr)
+    {
+        const auto desc = hudless->GetDesc();
+        config.HUDLessColor = ffxApiGetResourceDX12(hudless, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+        config.generationRect = { 0, 0, static_cast<int32_t>(desc.Width), static_cast<int32_t>(desc.Height) };
+    }
+    else
+    {
+        config.HUDLessColor = FfxApiResource({});
+        config.generationRect = { 0, 0, static_cast<int32_t>(_roiRect[frameId % BUFFER_COUNT].width),
+                                  static_cast<int32_t>(_roiRect[frameId % BUFFER_COUNT].height) };
+    }
+
+    const auto result = FfxApiProxy::D3D12_Configure(&_fgContext, &config.header);
+    if (result != FFX_API_RETURN_OK)
+    {
+        LOG_WARN("FSR FG ROI HUD-less configure failed: frame={} resource={:X} result={:X}", frameId,
+                 (size_t) hudless, (UINT) result);
+        return false;
+    }
+
+    return true;
 }
 
 bool FSRFG_Dx12::RecordPrepare(int index, UINT64 frameId, ID3D12GraphicsCommandList* commandList, uint32_t flags,
@@ -597,9 +649,14 @@ void FSRFG_Dx12::ReleaseLocalResources()
         SAFE_RELEASE(_roiOutput[i]);
         SAFE_RELEASE(_roiDepth[i]);
         SAFE_RELEASE(_roiVelocity[i]);
+        SAFE_RELEASE(_roiHudless[i]);
+        SAFE_RELEASE(_roiPreviousHudless[i]);
         SAFE_RELEASE(_roiRealColorHistory[i]);
+        SAFE_RELEASE(_roiRealHudlessHistory[i]);
         _roiRealColorHistoryFrameId[i] = 0;
         _roiRealColorHistoryValid[i] = false;
+        _roiRealHudlessHistoryFrameId[i] = 0;
+        _roiRealHudlessHistoryValid[i] = false;
         _roiRealColorHistoryRect[i] = {};
         _roiRect[i] = {};
     }
@@ -607,6 +664,9 @@ void FSRFG_Dx12::ReleaseLocalResources()
     _roiProviderHistoryFrameId = 0;
     _roiProviderHistoryRect = {};
     _roiProviderHistoryValid = false;
+    _roiProviderHistoryUsedHudless = false;
+    _roiHudlessActivationLogged = false;
+    _roiHudlessActive = false;
 }
 
 static void fgLogCallback(uint32_t type, const wchar_t* message)
@@ -679,6 +739,42 @@ bool FSRFG_Dx12::Dispatch(bool deferExecution)
     uiDesc.uiResource = FfxApiResource({});
 
     {
+        auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
+
+        // UIColor belongs to the physical swapchain composition path, not the
+        // local frame-generation context. Keeping it full-sized lets ROI mode
+        // use the same UI contract as normal FSR frame generation.
+        if (ui && IsResourceReady(FG_ResourceType::UIColor, fIndex) &&
+            !config->FGDrawUIOverFG.value_or_default())
+        {
+            auto* uiResource = ui->GetResource();
+            DXGI_SWAP_CHAIN_DESC swapChainDesc {};
+
+            if (uiResource != nullptr && _swapChain != nullptr && _swapChain->GetDesc(&swapChainDesc) == S_OK)
+            {
+                const auto resourceDesc = uiResource->GetDesc();
+                if (resourceDesc.Width == swapChainDesc.BufferDesc.Width &&
+                    resourceDesc.Height == swapChainDesc.BufferDesc.Height)
+                {
+                    uiDesc.uiResource = ffxApiGetResourceDX12(uiResource, GetFfxApiState(ui->state));
+                    uiDesc.flags = FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_ENABLE_INTERNAL_UI_DOUBLE_BUFFERING;
+                    if (config->FGUIPremultipliedAlpha.value_or_default())
+                        uiDesc.flags |= FFX_FRAMEGENERATION_UI_COMPOSITION_FLAG_USE_PREMUL_ALPHA;
+
+                    LOG_TRACE("Registering UI texture with FSR swapchain: {:X}, {}x{}, flags={:X}",
+                              (size_t) uiResource, resourceDesc.Width, resourceDesc.Height, uiDesc.flags);
+                }
+                else
+                {
+                    LOG_WARN("Skipping FSR UI texture with non-swapchain dimensions: UI={}x{}, swapchain={}x{}",
+                             resourceDesc.Width, resourceDesc.Height, swapChainDesc.BufferDesc.Width,
+                             swapChainDesc.BufferDesc.Height);
+                }
+            }
+        }
+    }
+
+    {
         auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
 
         if (!_roiContextActive && hudless && IsResourceReady(FG_ResourceType::HudlessColor, fIndex))
@@ -696,7 +792,9 @@ bool FSRFG_Dx12::Dispatch(bool deferExecution)
         }
     }
 
-    FfxApiProxy::D3D12_Configure(&_swapChainContext, &uiDesc.header);
+    const auto uiConfigureResult = FfxApiProxy::D3D12_Configure(&_swapChainContext, &uiDesc.header);
+    if (uiConfigureResult != FFX_API_RETURN_OK)
+        LOG_WARN("FSR swapchain UI registration failed: {:X}", (UINT) uiConfigureResult);
 
     if (fgConfig.HUDLessColor.resource != nullptr)
     {
@@ -754,18 +852,7 @@ bool FSRFG_Dx12::Dispatch(bool deferExecution)
     }
 
     fgConfig.frameGenerationCallbackUserContext = this;
-    fgConfig.frameGenerationCallback = [](ffxDispatchDescFrameGeneration* params, void* pUserCtx) -> ffxReturnCode_t
-    {
-        FSRFG_Dx12* fsrFG = nullptr;
-
-        if (pUserCtx != nullptr)
-            fsrFG = reinterpret_cast<FSRFG_Dx12*>(pUserCtx);
-
-        if (fsrFG != nullptr)
-            return fsrFG->DispatchCallback(params);
-
-        return FFX_API_RETURN_ERROR;
-    };
+    fgConfig.frameGenerationCallback = &FSRFG_Dx12::FrameGenerationCallback;
 
     fgConfig.onlyPresentGenerated = state.fgOnlyGenerated;
     fgConfig.frameID = willDispatchFrame;
@@ -866,6 +953,7 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
 
     if (_roiContextActive)
     {
+        _roiHudlessActive = false;
         const auto roi = _roiRect[fIndex].IsValid()
                              ? _roiRect[fIndex]
                              : ResolveRoi(fIndex, _physicalDisplayWidth, _physicalDisplayHeight);
@@ -924,21 +1012,67 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                 if (timingActive)
                     GazeRoiFrameSync::WriteGpuTimestamp(commandList, timingSlot, 2);
 
+                auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
+                auto dedicatedUi = GetResource(FG_ResourceType::UIColor, fIndex);
+                const bool dedicatedUiReady =
+                    dedicatedUi && IsResourceReady(FG_ResourceType::UIColor, fIndex) &&
+                    !Config::Instance()->FGDisableUI.value_or_default();
+                ID3D12Resource* hudlessResource = nullptr;
+                D3D12_RESOURCE_STATES hudlessState = D3D12_RESOURCE_STATE_COMMON;
+                bool currentHudlessReady = false;
+                if (!dedicatedUiReady && !Config::Instance()->FGDisableHudless.value_or_default() && hudless &&
+                    IsResourceReady(FG_ResourceType::HudlessColor, fIndex))
+                {
+                    hudlessResource = hudless->GetResource();
+                    hudlessState = hudless->state;
+                    if (hudlessResource != nullptr)
+                    {
+                        const auto hudlessDesc = hudlessResource->GetDesc();
+                        if (hudlessDesc.Width == _physicalDisplayWidth && hudlessDesc.Height == _physicalDisplayHeight &&
+                            CreateRoiSurface(hudlessResource, roi.width, roi.height,
+                                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                             &_roiHudless[fIndex], false))
+                        {
+                            currentHudlessReady =
+                                CopyRoi(commandList, hudlessResource, hudlessState, roi, _roiHudless[fIndex],
+                                        roi.width, roi.height, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                        }
+                        else
+                        {
+                            LOG_WARN("FSR FG ROI HUD-less source has incompatible dimensions: source={}x{} physical={}x{}",
+                                     hudlessDesc.Width, hudlessDesc.Height, _physicalDisplayWidth,
+                                     _physicalDisplayHeight);
+                        }
+                    }
+                }
+
+                if (currentHudlessReady && !_roiHudlessActivationLogged)
+                {
+                    LOG_INFO("FSR FG ROI HUD-less active: source={:X}, local={}x{}", (size_t) hudlessResource,
+                             roi.width, roi.height);
+                    _roiHudlessActivationLogged = true;
+                }
+
                 int previousHistoryIndex = -1;
+                int previousHudlessHistoryIndex = -1;
                 for (int i = 0; i < BUFFER_COUNT; ++i)
                 {
                     if (_roiRealColorHistoryValid[i] &&
                         _roiRealColorHistoryFrameId[i] + 1 == params->frameID)
                     {
                         previousHistoryIndex = i;
-                        break;
                     }
+
+                    if (_roiRealHudlessHistoryValid[i] &&
+                        _roiRealHudlessHistoryFrameId[i] + 1 == params->frameID)
+                        previousHudlessHistoryIndex = i;
                 }
 
                 const bool providerHistoryMatches =
                     _roiProviderHistoryValid && _roiProviderHistoryFrameId + 1 == params->frameID &&
                     _roiProviderHistoryRect.left == roi.left && _roiProviderHistoryRect.top == roi.top &&
-                    _roiProviderHistoryRect.width == roi.width && _roiProviderHistoryRect.height == roi.height;
+                    _roiProviderHistoryRect.width == roi.width && _roiProviderHistoryRect.height == roi.height &&
+                    _roiProviderHistoryUsedHudless == currentHudlessReady;
 
                 bool previousCropReady = false;
                 if (!providerHistoryMatches && previousHistoryIndex >= 0 &&
@@ -949,6 +1083,18 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                     previousCropReady = CopyRoi(
                         commandList, _roiRealColorHistory[previousHistoryIndex],
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, roi, _roiPreviousColor[fIndex], roi.width,
+                        roi.height, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                }
+
+                bool previousHudlessCropReady = false;
+                if (!providerHistoryMatches && currentHudlessReady && previousHudlessHistoryIndex >= 0 &&
+                    CreateRoiSurface(_roiRealHudlessHistory[previousHudlessHistoryIndex], roi.width, roi.height,
+                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                     &_roiPreviousHudless[fIndex], false))
+                {
+                    previousHudlessCropReady = CopyRoi(
+                        commandList, _roiRealHudlessHistory[previousHudlessHistoryIndex],
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, roi, _roiPreviousHudless[fIndex], roi.width,
                         roi.height, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 }
 
@@ -976,14 +1122,38 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                              params->frameID);
                 }
 
+                bool currentHudlessHistoryReady = false;
+                if (currentHudlessReady)
+                {
+                    const auto hudlessDesc = hudlessResource->GetDesc();
+                    currentHudlessHistoryReady =
+                        CreateRoiSurface(hudlessResource, static_cast<UINT>(hudlessDesc.Width), hudlessDesc.Height,
+                                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                         &_roiRealHudlessHistory[fIndex], false) &&
+                        CopyFull(commandList, hudlessResource, hudlessState, _roiRealHudlessHistory[fIndex],
+                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                }
+
+                if (currentHudlessHistoryReady)
+                {
+                    _roiRealHudlessHistoryFrameId[fIndex] = params->frameID;
+                    _roiRealHudlessHistoryValid[fIndex] = true;
+                }
+                else
+                {
+                    _roiRealHudlessHistoryValid[fIndex] = false;
+                }
+
                 if (timingActive)
                     GazeRoiFrameSync::WriteGpuTimestamp(commandList, timingSlot, 4);
 
                 // The physical output is deliberately initialized with the current complete image. The local
                 // generated result overwrites only R_FG below; this is the phase-one peripheral placeholder.
                 LOG_DEBUG("FSR FG local provider route=local-context frame={} display={}x{} "
-                          "providerHistoryMatches={} previousRealFrame={} periphery=external-current-image-placeholder",
-                          params->frameID, roi.width, roi.height, providerHistoryMatches, previousCropReady);
+                          "providerHistoryMatches={} previousRealFrame={} hudlessCurrent={} hudlessPrevious={} "
+                          "periphery=external-current-image-placeholder",
+                          params->frameID, roi.width, roi.height, providerHistoryMatches, previousCropReady,
+                          currentHudlessReady, previousHudlessCropReady);
                 ffxDispatchDescFrameGeneration localParams = *params;
                 localParams.presentColor =
                     ffxApiGetResourceDX12(_roiColor[fIndex], FFX_API_RESOURCE_STATE_COMPUTE_READ);
@@ -991,22 +1161,37 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                     ffxApiGetResourceDX12(_roiOutput[fIndex], FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
                 localParams.generationRect = { 0, 0, static_cast<int32_t>(roi.width), static_cast<int32_t>(roi.height) };
 
+                const bool previousSourceReady =
+                    previousCropReady && (!currentHudlessReady || previousHudlessCropReady);
                 bool providerHistoryReady = providerHistoryMatches;
                 if (timingActive)
-                    GazeRoiFrameSync::SetGpuTimingPrime(commandList, timingSlot, !providerHistoryMatches && previousCropReady);
-                if (!providerHistoryMatches && previousCropReady)
+                    GazeRoiFrameSync::SetGpuTimingPrime(commandList, timingSlot,
+                                                       !providerHistoryMatches && previousSourceReady);
+                if (!providerHistoryMatches && previousSourceReady)
                 {
                     ffxDispatchDescFrameGeneration historyParams = localParams;
                     historyParams.presentColor =
                         ffxApiGetResourceDX12(_roiPreviousColor[fIndex], FFX_API_RESOURCE_STATE_COMPUTE_READ);
                     historyParams.reset = 1;
 
-                    const auto historyResult = FfxApiProxy::D3D12_Dispatch(&_fgContext, &historyParams.header);
-                    providerHistoryReady = historyResult == FFX_API_RETURN_OK;
+                    const auto previousHudless = currentHudlessReady ? _roiPreviousHudless[fIndex] : nullptr;
+                    const bool historyConfigured = ConfigureLocalHudless(previousHudless, params->frameID);
+                    const auto historyResult = historyConfigured
+                                                   ? FfxApiProxy::D3D12_Dispatch(&_fgContext, &historyParams.header)
+                                                   : FFX_API_RETURN_ERROR;
+                    providerHistoryReady = historyConfigured && historyResult == FFX_API_RETURN_OK;
                     LOG_DEBUG("FSR FG moving ROI history prime: frame={} previousFrame={} rect=({},{} {}x{}) result={:X}",
                               params->frameID, params->frameID - 1, roi.left, roi.top, roi.width, roi.height,
                               (UINT) historyResult);
                 }
+
+                if (!ConfigureLocalHudless(currentHudlessReady ? _roiHudless[fIndex] : nullptr, params->frameID))
+                {
+                    currentHudlessReady = false;
+                    providerHistoryReady = false;
+                    ConfigureLocalHudless(nullptr, params->frameID);
+                }
+                _roiHudlessActive = currentHudlessReady;
 
                 if (!providerHistoryReady)
                 {
@@ -1026,6 +1211,7 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                     _roiProviderHistoryFrameId = params->frameID;
                     _roiProviderHistoryRect = roi;
                     _roiProviderHistoryValid = true;
+                    _roiProviderHistoryUsedHudless = currentHudlessReady;
 
                     ResourceBarrier(commandList, _roiOutput[fIndex], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                     D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1059,6 +1245,8 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
 
                 LOG_WARN("FSR FG local dispatch failed ({:X}); returning provider error", (UINT) localResult);
                 _roiProviderHistoryValid = false;
+                _roiProviderHistoryUsedHudless = false;
+                _roiHudlessActive = false;
                 _lastFrameId = params->frameID;
                 return localResult;
             }
