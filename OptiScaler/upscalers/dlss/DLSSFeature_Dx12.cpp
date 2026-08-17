@@ -1398,68 +1398,89 @@ bool DLSSFeatureDx12::ResolveGazeRoiOptimalInput(NVSDK_NGX_Parameter* InParamete
 
     const int perfQuality = GetNgxValue<int>(InParameters, NVSDK_NGX_Parameter_PerfQualityValue,
                                              static_cast<int>(PerfQualityValue()));
+    void* callbackPointer = nullptr;
+    NVSDK_NGX_Result callbackLookupResult =
+        InParameters->Get(NVSDK_NGX_Parameter_DLSSOptimalSettingsCallback, &callbackPointer);
+    if (callbackLookupResult != NVSDK_NGX_Result_Success || callbackPointer == nullptr)
+    {
+        callbackPointer = nullptr;
+        callbackLookupResult =
+            InParameters->Get(NVSDK_NGX_EParameter_DLSSOptimalSettingsCallback, &callbackPointer);
+    }
+    const bool hasOptimalSettingsCallback =
+        callbackLookupResult == NVSDK_NGX_Result_Success && callbackPointer != nullptr;
+
     std::ostringstream signature;
-    signature << outputRect.width << 'x' << outputRect.height << ":quality=" << perfQuality;
+    signature << outputRect.width << 'x' << outputRect.height << ":quality=" << perfQuality << ":render="
+              << RenderWidth() << 'x' << RenderHeight() << ":target=" << TargetWidth() << 'x' << TargetHeight()
+              << ":callback=" << hasOptimalSettingsCallback;
     for (size_t index = 0; index < std::size(gazeRoiPresetKeys); ++index)
         signature << ':' << GazeRoiCreatePresetValue(InParameters, index);
 
     const std::string querySignature = signature.str();
     if (_gazeRoiOptimalSignature != querySignature)
     {
-        void* callbackPointer = nullptr;
-        if (InParameters->Get(NVSDK_NGX_Parameter_DLSSOptimalSettingsCallback, &callbackPointer) !=
-                NVSDK_NGX_Result_Success &&
-            InParameters->Get(NVSDK_NGX_EParameter_DLSSOptimalSettingsCallback, &callbackPointer) !=
-                NVSDK_NGX_Result_Success)
+        if (!hasOptimalSettingsCallback)
         {
-            LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_OPTIMAL_CALLBACK_MISSING");
-            return false;
-        }
+            _gazeRoiOptimalWidth = inputRect.width;
+            _gazeRoiOptimalHeight = inputRect.height;
+            _gazeRoiOptimalMinWidth = inputRect.width;
+            _gazeRoiOptimalMinHeight = inputRect.height;
+            _gazeRoiOptimalMaxWidth = inputRect.width;
+            _gazeRoiOptimalMaxHeight = inputRect.height;
+            _gazeRoiOptimalSignature = querySignature;
 
-        using OptimalSettingsCallback = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter*);
-        const auto callback = reinterpret_cast<OptimalSettingsCallback>(callbackPointer);
-        if (callback == nullptr)
+            LOG_INFO(
+                "[GROI_CONTRACT] optimal callback unavailable; using native-scale ROI input {}x{} -> {}x{} "
+                "from render={}x{} target={}x{}",
+                inputRect.width, inputRect.height, outputRect.width, outputRect.height, RenderWidth(),
+                RenderHeight(), TargetWidth(), TargetHeight());
+        }
+        else
         {
-            LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_OPTIMAL_CALLBACK_NULL");
-            return false;
+            using OptimalSettingsCallback = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter*);
+            const auto callback = reinterpret_cast<OptimalSettingsCallback>(callbackPointer);
+
+            NgxParameterOverlay optimalParameters(InParameters, "optimal");
+            optimalParameters.SetOverride(NVSDK_NGX_Parameter_Width, outputRect.width);
+            optimalParameters.SetOverride(NVSDK_NGX_Parameter_Height, outputRect.height);
+            optimalParameters.SetOverride(NVSDK_NGX_Parameter_PerfQualityValue, perfQuality);
+            for (size_t index = 0; index < std::size(gazeRoiPresetKeys); ++index)
+                optimalParameters.SetOverride(gazeRoiPresetKeys[index],
+                                              GazeRoiCreatePresetValue(InParameters, index));
+
+            const NVSDK_NGX_Result queryResult = callback(&optimalParameters);
+            uint32_t optimalWidth = 0;
+            uint32_t optimalHeight = 0;
+            if (queryResult != NVSDK_NGX_Result_Success ||
+                optimalParameters.Get(NVSDK_NGX_Parameter_OutWidth, &optimalWidth) !=
+                    NVSDK_NGX_Result_Success ||
+                optimalParameters.Get(NVSDK_NGX_Parameter_OutHeight, &optimalHeight) !=
+                    NVSDK_NGX_Result_Success ||
+                optimalWidth == 0 || optimalHeight == 0)
+            {
+                LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_OPTIMAL_QUERY result={:X}",
+                          static_cast<unsigned int>(queryResult));
+                return false;
+            }
+
+            _gazeRoiOptimalWidth = optimalWidth;
+            _gazeRoiOptimalHeight = optimalHeight;
+            _gazeRoiOptimalMinWidth = GetNgxValue<unsigned int>(
+                &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, optimalWidth);
+            _gazeRoiOptimalMinHeight = GetNgxValue<unsigned int>(
+                &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, optimalHeight);
+            _gazeRoiOptimalMaxWidth = GetNgxValue<unsigned int>(
+                &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, optimalWidth);
+            _gazeRoiOptimalMaxHeight = GetNgxValue<unsigned int>(
+                &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, optimalHeight);
+            _gazeRoiOptimalSignature = querySignature;
+
+            LOG_INFO("[GROI_CONTRACT] optimal ROI {}x{} -> {}x{}, dynamic {}x{}..{}x{} quality={}",
+                     _gazeRoiOptimalWidth, _gazeRoiOptimalHeight, outputRect.width, outputRect.height,
+                     _gazeRoiOptimalMinWidth, _gazeRoiOptimalMinHeight, _gazeRoiOptimalMaxWidth,
+                     _gazeRoiOptimalMaxHeight, perfQuality);
         }
-
-        NgxParameterOverlay optimalParameters(InParameters, "optimal");
-        optimalParameters.SetOverride(NVSDK_NGX_Parameter_Width, outputRect.width);
-        optimalParameters.SetOverride(NVSDK_NGX_Parameter_Height, outputRect.height);
-        optimalParameters.SetOverride(NVSDK_NGX_Parameter_PerfQualityValue, perfQuality);
-        for (size_t index = 0; index < std::size(gazeRoiPresetKeys); ++index)
-            optimalParameters.SetOverride(gazeRoiPresetKeys[index], GazeRoiCreatePresetValue(InParameters, index));
-
-        const NVSDK_NGX_Result queryResult = callback(&optimalParameters);
-        uint32_t optimalWidth = 0;
-        uint32_t optimalHeight = 0;
-        if (queryResult != NVSDK_NGX_Result_Success ||
-            optimalParameters.Get(NVSDK_NGX_Parameter_OutWidth, &optimalWidth) != NVSDK_NGX_Result_Success ||
-            optimalParameters.Get(NVSDK_NGX_Parameter_OutHeight, &optimalHeight) != NVSDK_NGX_Result_Success ||
-            optimalWidth == 0 || optimalHeight == 0)
-        {
-            LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_OPTIMAL_QUERY result={:X}",
-                      static_cast<unsigned int>(queryResult));
-            return false;
-        }
-
-        _gazeRoiOptimalWidth = optimalWidth;
-        _gazeRoiOptimalHeight = optimalHeight;
-        _gazeRoiOptimalMinWidth = GetNgxValue<unsigned int>(
-            &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, optimalWidth);
-        _gazeRoiOptimalMinHeight = GetNgxValue<unsigned int>(
-            &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, optimalHeight);
-        _gazeRoiOptimalMaxWidth = GetNgxValue<unsigned int>(
-            &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, optimalWidth);
-        _gazeRoiOptimalMaxHeight = GetNgxValue<unsigned int>(
-            &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, optimalHeight);
-        _gazeRoiOptimalSignature = querySignature;
-
-        LOG_INFO("[GROI_CONTRACT] optimal ROI {}x{} -> {}x{}, dynamic {}x{}..{}x{} quality={}",
-                 _gazeRoiOptimalWidth, _gazeRoiOptimalHeight, outputRect.width, outputRect.height,
-                 _gazeRoiOptimalMinWidth, _gazeRoiOptimalMinHeight, _gazeRoiOptimalMaxWidth,
-                 _gazeRoiOptimalMaxHeight, perfQuality);
     }
 
     if (_gazeRoiOptimalWidth < _gazeRoiOptimalMinWidth || _gazeRoiOptimalHeight < _gazeRoiOptimalMinHeight ||
