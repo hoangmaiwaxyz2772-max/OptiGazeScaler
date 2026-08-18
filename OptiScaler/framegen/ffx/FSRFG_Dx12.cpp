@@ -567,6 +567,21 @@ Texture2D<float> PreviousDepth : register(t5);
 Texture2D<float4> BackgroundMotionField : register(t6);
 RWTexture2D<float4> OutputColor : register(u0);
 
+float MinDividedByMax(float v0, float v1)
+{
+    const float m = max(v0, v1);
+    return m != 0.0f ? min(v0, v1) / m : 0.0f;
+}
+
+float CalculateStaticContentFactor(float3 currentInterpolationSource, float3 presentColor)
+{
+    const float3 factor = saturate(float3(
+        saturate((1.0f - MinDividedByMax(currentInterpolationSource.r, presentColor.r)) / 0.1f),
+        saturate((1.0f - MinDividedByMax(currentInterpolationSource.g, presentColor.g)) / 0.1f),
+        saturate((1.0f - MinDividedByMax(currentInterpolationSource.b, presentColor.b)) / 0.1f)));
+    return max(factor.x, max(factor.y, factor.z));
+}
+
 int2 ClampPixel(int2 p)
 {
     return clamp(p, int2(0, 0), int2((int)_Width - 1, (int)_Height - 1));
@@ -583,7 +598,6 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         return;
 
     const float4 present = CurrentColor.Load(int3(p, 0));
-
     const float2 displaySize = float2((float)_Width, (float)_Height);
     const float2 mvSize = float2(max(_MvWidth, 1u), max(_MvHeight, 1u));
     const float2 fp = float2(p) + 0.5f;
@@ -669,9 +683,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     }
 
     const float4 hudless = CurrentHudless.Load(int3(p, 0));
-    const float3 difference = abs(present.rgb - hudless.rgb);
-    const float delta = max(max(difference.r, difference.g), difference.b);
-    const float uiMask = smoothstep(_HudThreshold, _HudThreshold * 2.0f, delta);
+    const float uiMask = CalculateStaticContentFactor(hudless.rgb, present.rgb);
     OutputColor[p] = lerp(reprojectedScene, present, uiMask);
 }
 )";
@@ -2027,7 +2039,8 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                         {
                             peripheralReprojectionReady = _peripheralReprojection->Dispatch(
                                 commandList, presentColor, reprojectionHudless,
-                                _roiRealHudlessHistory[previousHudlessHistoryIndex], motionVectors,
+                                _roiRealHudlessHistory[previousHudlessHistoryIndex],
+                                motionVectors,
                                 depthResource, _roiRealDepthHistory[previousDepthHistoryIndex],
                                 _roiPeripheralOutput[fIndex], presentState, reprojectionHudlessState,
                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
