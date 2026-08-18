@@ -170,6 +170,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             FSRFGROIFixedTop.set_from_config(readInt("FSRFGROI", "FixedTop"));
             FSRFGROIStagingBypass.set_from_config(readBool("FSRFGROI", "StagingBypass"));
             FSRFGROIBatchPrepare.set_from_config(readBool("FSRFGROI", "BatchPrepare"));
+            FSRFGROIPeripheralReprojection.set_from_config(readBool("FSRFGROI", "PeripheralReprojection"));
+            FSRFGROIPeripheralDepthConservative.set_from_config(
+                readBool("FSRFGROI", "PeripheralDepthConservative"));
         }
 
         // OptiFG
@@ -1083,6 +1086,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FSRFGROIBatchPrepare.value_for_config()).c_str());
         ini.SetValue("FSRFGROI", "PeripheralReprojection",
                      GetBoolValue(Instance()->FSRFGROIPeripheralReprojection.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "PeripheralDepthConservative",
+                     GetBoolValue(Instance()->FSRFGROIPeripheralDepthConservative.value_for_config()).c_str());
     }
 
     // XeFG output

@@ -180,6 +180,8 @@ cbuffer Params : register(b0)
     uint _DepthWidth;
     uint _DepthHeight;
     float _DepthThreshold;
+    uint _DepthInverted;
+    uint _ConservativeDepthFallback;
 };
 
 Texture2D<float4> CurrentColor : register(t0);
@@ -233,11 +235,28 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     const float depthLimit = max(_DepthThreshold,
                                  max(abs(currentDepth), abs(previousDepth)) * 0.02f);
     const bool depthValid = all(isfinite(float2(currentDepth, previousDepth))) && depthDelta <= depthLimit;
+    const bool currentIsFront = _DepthInverted != 0 ? currentDepth > previousDepth : currentDepth < previousDepth;
+    bool currentCoversOutput = false;
+    if (!depthValid && _ConservativeDepthFallback == 0 && currentIsFront)
+    {
+        const uint2 outputDepthPixel = min(uint2(fp * depthSize / displaySize),
+                                           uint2(_DepthWidth - 1, _DepthHeight - 1));
+        const float outputCurrentDepth = CurrentDepth.Load(int3(outputDepthPixel, 0));
+        const float coverageLimit = max(_DepthThreshold,
+                                        max(abs(outputCurrentDepth), abs(currentDepth)) * 0.02f);
+        currentCoversOutput = all(isfinite(float2(outputCurrentDepth, currentDepth))) &&
+                              abs(outputCurrentDepth - currentDepth) <= coverageLimit;
+    }
 
     const float4 currentScene = CurrentHudless.Load(int3(currentPixel, 0));
     const float4 previousScene = PreviousHudless.Load(int3(previousPixel, 0));
-    const float4 reprojectedScene = depthValid ? 0.5f * (currentScene + previousScene) :
-                                                   CurrentHudless.Load(int3(p, 0));
+    const float4 currentImage = CurrentHudless.Load(int3(p, 0));
+    const float4 reprojectedScene = depthValid
+                                        ? 0.5f * (currentScene + previousScene)
+                                        : (_ConservativeDepthFallback != 0
+                                               ? currentImage
+                                               : (currentIsFront ? (currentCoversOutput ? currentScene : previousScene)
+                                                                  : currentImage));
 
     const float4 present = CurrentColor.Load(int3(p, 0));
     const float4 hudless = CurrentHudless.Load(int3(p, 0));
@@ -267,6 +286,8 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
         UINT depthWidth = 0;
         UINT depthHeight = 0;
         float depthThreshold = 0.002f;
+        UINT depthInverted = 0;
+        UINT conservativeDepthFallback = 0;
     };
 
     static constexpr UINT ConstantDwords = sizeof(Constants) / sizeof(UINT);
@@ -325,7 +346,7 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES currentDepthState,
                   D3D12_RESOURCE_STATES previousDepthState, D3D12_RESOURCE_STATES outputState,
                   const FsrFgRoiRect& roi, float mvScaleX, float mvScaleY, bool lowResolution, float hudThreshold,
-                  float depthThreshold)
+                  float depthThreshold, bool invertedDepth, bool conservativeDepthFallback)
     {
         if (!_init || commandList == nullptr || current == nullptr || currentHudless == nullptr ||
             previousHudless == nullptr || motionVectors == nullptr || currentDepth == nullptr ||
@@ -381,6 +402,8 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
         constants.depthWidth = static_cast<UINT>(currentDepthDesc.Width);
         constants.depthHeight = currentDepthDesc.Height;
         constants.depthThreshold = std::isfinite(depthThreshold) && depthThreshold > 0.0f ? depthThreshold : 0.002f;
+        constants.depthInverted = invertedDepth ? 1u : 0u;
+        constants.conservativeDepthFallback = conservativeDepthFallback ? 1u : 0u;
 
         Transition(commandList, current, currentState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Transition(commandList, currentHudless, currentHudlessState,
@@ -1475,7 +1498,8 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                                 velocity->state, depth->state,
                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                 D3D12_RESOURCE_STATE_COPY_DEST, roi, _mvScaleX[fIndex], _mvScaleY[fIndex],
-                                IsLowResMV(), GetHudDetectionThreshold(), 0.002f);
+                                IsLowResMV(), GetHudDetectionThreshold(), 0.002f, IsInvertedDepth(),
+                                Config::Instance()->FSRFGROIPeripheralDepthConservative.value_or_default());
                         }
 
                         if (peripheralReprojectionReady)
@@ -1485,7 +1509,8 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                             LOG_DEBUG("FSR FG ROI UI-aware peripheral reprojection active: frame={} present={} "
                                       "hudless={} previousHudless={} mv={} depth={} previousDepth={} mvSize={}x{} "
                                       "depthSize={}x{} lowRes={} threshold={} depthThreshold={} "
-                                      "depthReject=single-sample "
+                                      "depthReject=single-sample coverageCheck=current-depth depthInverted={} "
+                                      "depthPolicy={} "
                                       "roi=({},{} {}x{})",
                                       params->frameID, (size_t) presentColor, (size_t) hudlessResource,
                                       (size_t) _roiRealHudlessHistory[previousHudlessHistoryIndex],
@@ -1493,7 +1518,10 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                                       (size_t) _roiRealDepthHistory[previousDepthHistoryIndex],
                                       motionVectors->GetDesc().Width, motionVectors->GetDesc().Height,
                                       depthResource->GetDesc().Width, depthResource->GetDesc().Height, IsLowResMV(),
-                                      GetHudDetectionThreshold(), 0.002f,
+                                      GetHudDetectionThreshold(), 0.002f, IsInvertedDepth(),
+                                      Config::Instance()->FSRFGROIPeripheralDepthConservative.value_or_default()
+                                          ? "conservative"
+                                          : "front-preserve",
                                       roi.left, roi.top, roi.width, roi.height);
                         }
                     }

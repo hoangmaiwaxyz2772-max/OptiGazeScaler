@@ -3636,6 +3636,19 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                            "OptiFG UI detection preserves current UI pixels. Without consecutive HUD-less capture, "
                            "the periphery falls back to the current image.");
 
+            ImGui::BeginDisabled(!fsrFgRoiPeripheralReprojection);
+            bool fsrFgRoiPeripheralDepthConservative =
+                config->FSRFGROIPeripheralDepthConservative.value_or_default();
+            if (ImGui::Checkbox("Conservative depth fallback", &fsrFgRoiPeripheralDepthConservative))
+            {
+                config->FSRFGROIPeripheralDepthConservative = fsrFgRoiPeripheralDepthConservative;
+                LOG_INFO("FSR FG ROI peripheral conservative depth fallback: {}",
+                         fsrFgRoiPeripheralDepthConservative);
+            }
+            ShowHelpMarker("On depth conflicts, reject both temporal samples and use the current image. "
+                           "Leave disabled to preserve current-frame foreground reprojection.");
+            ImGui::EndDisabled();
+
             ImGui::EndDisabled();
 
             if (fsrFgRoiEnabled && config->GazeRoiGpuTiming.value_or_default())
