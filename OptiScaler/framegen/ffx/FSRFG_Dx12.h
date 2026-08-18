@@ -20,6 +20,8 @@ struct FsrFgRoiRect
     bool IsValid() const { return width != 0 && height != 0; }
 };
 
+class FsrFgPeripheralReprojection;
+
 class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 {
   private:
@@ -56,10 +58,14 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     ID3D12Resource* _roiPreviousHudless[BUFFER_COUNT] {};
     ID3D12Resource* _roiRealColorHistory[BUFFER_COUNT] {};
     ID3D12Resource* _roiRealHudlessHistory[BUFFER_COUNT] {};
+    ID3D12Resource* _roiRealDepthHistory[BUFFER_COUNT] {};
+    ID3D12Resource* _roiPeripheralOutput[BUFFER_COUNT] {};
     UINT64 _roiRealColorHistoryFrameId[BUFFER_COUNT] {};
     bool _roiRealColorHistoryValid[BUFFER_COUNT] {};
     UINT64 _roiRealHudlessHistoryFrameId[BUFFER_COUNT] {};
     bool _roiRealHudlessHistoryValid[BUFFER_COUNT] {};
+    UINT64 _roiRealDepthHistoryFrameId[BUFFER_COUNT] {};
+    bool _roiRealDepthHistoryValid[BUFFER_COUNT] {};
     FsrFgRoiRect _roiRealColorHistoryRect[BUFFER_COUNT] {};
     FsrFgRoiRect _roiRect[BUFFER_COUNT] {};
     UINT64 _roiProviderHistoryFrameId = 0;
@@ -72,6 +78,7 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     UINT _physicalDisplayWidth = 0;
     UINT _physicalDisplayHeight = 0;
     int _deferredPrepareIndex = -1;
+    FsrFgPeripheralReprojection* _peripheralReprojection = nullptr;
 
     static FfxApiResourceState GetFfxApiState(D3D12_RESOURCE_STATES state)
     {

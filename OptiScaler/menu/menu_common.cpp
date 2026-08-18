@@ -3626,6 +3626,16 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             ShowHelpMarker("Preserves FSR's callback-before-Prepare ordering while submitting the callback, UI and "
                            "Prepare command lists together. Disable for an A/B comparison.");
 
+            bool fsrFgRoiPeripheralReprojection = config->FSRFGROIPeripheralReprojection.value_or_default();
+            if (ImGui::Checkbox("Peripheral MV reprojection", &fsrFgRoiPeripheralReprojection))
+            {
+                config->FSRFGROIPeripheralReprojection = fsrFgRoiPeripheralReprojection;
+                LOG_INFO("FSR FG ROI peripheral reprojection: {}", fsrFgRoiPeripheralReprojection);
+            }
+            ShowHelpMarker("Experimental peripheral reprojection using current/previous HUD-less Color and game MV. "
+                           "OptiFG UI detection preserves current UI pixels. Without consecutive HUD-less capture, "
+                           "the periphery falls back to the current image.");
+
             ImGui::EndDisabled();
 
             if (fsrFgRoiEnabled && config->GazeRoiGpuTiming.value_or_default())

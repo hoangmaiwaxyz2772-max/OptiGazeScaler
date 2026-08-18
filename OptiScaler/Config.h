@@ -636,6 +636,7 @@ class Config
     CustomOptional<int, NoDefault> FSRFGROIFixedTop;
     CustomOptional<bool> FSRFGROIStagingBypass { true };
     CustomOptional<bool> FSRFGROIBatchPrepare { false };
+    CustomOptional<bool> FSRFGROIPeripheralReprojection { false };
 
     // XeFG
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };

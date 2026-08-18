@@ -1081,6 +1081,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FSRFGROIStagingBypass.value_for_config()).c_str());
         ini.SetValue("FSRFGROI", "BatchPrepare",
                      GetBoolValue(Instance()->FSRFGROIBatchPrepare.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "PeripheralReprojection",
+                     GetBoolValue(Instance()->FSRFGROIPeripheralReprojection.value_for_config()).c_str());
     }
 
     // XeFG output
