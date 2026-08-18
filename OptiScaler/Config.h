@@ -638,6 +638,7 @@ class Config
     CustomOptional<bool> FSRFGROIBatchPrepare { false };
     CustomOptional<bool> FSRFGROIPeripheralReprojection { false };
     CustomOptional<bool> FSRFGROIPeripheralDepthConservative { false };
+    CustomOptional<bool> FSRFGROIPeripheralBackgroundMvPyramid { false };
 
     // XeFG
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };

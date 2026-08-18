@@ -173,6 +173,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             FSRFGROIPeripheralReprojection.set_from_config(readBool("FSRFGROI", "PeripheralReprojection"));
             FSRFGROIPeripheralDepthConservative.set_from_config(
                 readBool("FSRFGROI", "PeripheralDepthConservative"));
+            FSRFGROIPeripheralBackgroundMvPyramid.set_from_config(
+                readBool("FSRFGROI", "PeripheralBackgroundMvPyramid"));
         }
 
         // OptiFG
@@ -1088,6 +1090,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FSRFGROIPeripheralReprojection.value_for_config()).c_str());
         ini.SetValue("FSRFGROI", "PeripheralDepthConservative",
                      GetBoolValue(Instance()->FSRFGROIPeripheralDepthConservative.value_for_config()).c_str());
+        ini.SetValue("FSRFGROI", "PeripheralBackgroundMvPyramid",
+                     GetBoolValue(Instance()->FSRFGROIPeripheralBackgroundMvPyramid.value_for_config()).c_str());
     }
 
     // XeFG output

@@ -3647,6 +3647,19 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             }
             ShowHelpMarker("On depth conflicts, reject both temporal samples and use the current image. "
                            "Leave disabled to preserve current-frame foreground reprojection.");
+
+            ImGui::BeginDisabled(fsrFgRoiPeripheralDepthConservative);
+            bool fsrFgRoiPeripheralBackgroundMvPyramid =
+                config->FSRFGROIPeripheralBackgroundMvPyramid.value_or_default();
+            if (ImGui::Checkbox("Peripheral background MV pyramid", &fsrFgRoiPeripheralBackgroundMvPyramid))
+            {
+                config->FSRFGROIPeripheralBackgroundMvPyramid = fsrFgRoiPeripheralBackgroundMvPyramid;
+                LOG_INFO("FSR FG ROI peripheral background MV pyramid: {}", fsrFgRoiPeripheralBackgroundMvPyramid);
+            }
+            ShowHelpMarker("Optional depth-guided low-resolution MV field for large background gaps. Leave disabled "
+                           "for the cheaper direct frame-0 background candidate. "
+                           "Conservative depth fallback already rejects these samples.");
+            ImGui::EndDisabled();
             ImGui::EndDisabled();
 
             ImGui::EndDisabled();

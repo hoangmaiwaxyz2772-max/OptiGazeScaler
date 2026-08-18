@@ -160,6 +160,377 @@ static inline void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3
     InCommandList->ResourceBarrier(1, &barrier);
 }
 
+static const char* fsrFgBackgroundMvPyramidShader = R"(
+cbuffer Params : register(b0)
+{
+    uint _FieldWidth;
+    uint _FieldHeight;
+    uint _DisplayWidth;
+    uint _DisplayHeight;
+    uint _MvWidth;
+    uint _MvHeight;
+    uint _DepthWidth;
+    uint _DepthHeight;
+    float _MvScaleX;
+    float _MvScaleY;
+    uint _MvLowResolution;
+    float _DepthThreshold;
+    uint _Mode;
+    uint _Step;
+};
+
+Texture2D<float4> MotionVectors : register(t0);
+Texture2D<float> CurrentDepth : register(t1);
+Texture2D<float> PreviousDepth : register(t2);
+Texture2D<float4> InputField : register(t3);
+RWTexture2D<float4> OutputField : register(u0);
+
+float2 DisplaySize()
+{
+    return float2((float)_DisplayWidth, (float)_DisplayHeight);
+}
+
+float2 FieldSize()
+{
+    return float2((float)_FieldWidth, (float)_FieldHeight);
+}
+
+float2 LoadMotion(float2 displayPosition)
+{
+    const float2 displaySize = DisplaySize();
+    const float2 mvSize = float2(max(_MvWidth, 1u), max(_MvHeight, 1u));
+    const uint2 pixel = _MvLowResolution != 0
+                            ? min(uint2(displayPosition * mvSize / displaySize),
+                                  uint2(_MvWidth - 1, _MvHeight - 1))
+                            : min(uint2(displayPosition), uint2(_MvWidth - 1, _MvHeight - 1));
+    float2 motion = MotionVectors.Load(int3(pixel, 0)).xy;
+    motion *= float2(_MvScaleX, _MvScaleY);
+    motion *= displaySize / (_MvLowResolution != 0 ? displaySize : mvSize);
+    return motion;
+}
+
+float LoadDepth(Texture2D<float> depth, float2 displayPosition)
+{
+    const float2 displaySize = DisplaySize();
+    const float2 depthSize = float2((float)max(_DepthWidth, 1u), (float)max(_DepthHeight, 1u));
+    const uint2 pixel = min(uint2(displayPosition * depthSize / displaySize),
+                            uint2(_DepthWidth - 1, _DepthHeight - 1));
+    return depth.Load(int3(pixel, 0));
+}
+
+bool DepthCompatible(float a, float b)
+{
+    const float limit = max(_DepthThreshold, max(abs(a), abs(b)) * 0.02f);
+    return all(isfinite(float2(a, b))) && abs(a - b) <= limit;
+}
+
+bool ValidMotion(float2 motion)
+{
+    return all(isfinite(motion)) && all(abs(motion) <= DisplaySize() * 0.5f);
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    const uint2 cell = id.xy;
+    if (cell.x >= _FieldWidth || cell.y >= _FieldHeight)
+        return;
+
+    const float2 displaySize = DisplaySize();
+    const float2 fieldSize = FieldSize();
+    const float2 displayPosition = (float2(cell) + 0.5f) * displaySize / fieldSize;
+
+    if (_Mode == 0)
+    {
+        float4 best = float4(0.0f, 0.0f, -1.0f, -1.0f);
+        float bestDistance = 1e30f;
+        [unroll]
+        for (uint sy = 0; sy < 4; ++sy)
+        {
+            [unroll]
+            for (uint sx = 0; sx < 4; ++sx)
+            {
+                const float2 samplePosition = (float2(cell) + (float2(sx, sy) + 0.5f) * 0.25f) *
+                                               displaySize / fieldSize;
+                const float2 motion = LoadMotion(samplePosition);
+                if (!ValidMotion(motion))
+                    continue;
+
+                const float currentDepth = LoadDepth(CurrentDepth, samplePosition);
+                const float previousDepth = LoadDepth(PreviousDepth, samplePosition + motion);
+                if (!DepthCompatible(currentDepth, previousDepth))
+                    continue;
+
+                const float distanceToCell = dot(samplePosition - displayPosition,
+                                                 samplePosition - displayPosition);
+                if (distanceToCell < bestDistance)
+                {
+                    best = float4(motion, float2(cell) + 0.5f);
+                    bestDistance = distanceToCell;
+                }
+            }
+        }
+        OutputField[cell] = best;
+        return;
+    }
+
+    const float2 targetMotion = LoadMotion(displayPosition);
+    const float targetPreviousDepth = LoadDepth(PreviousDepth, displayPosition + targetMotion);
+    float4 best = float4(0.0f, 0.0f, -1.0f, -1.0f);
+    float bestDistance = 1e30f;
+    const int step = max((int)_Step, 1);
+
+    [unroll]
+    for (int oy = -1; oy <= 1; ++oy)
+    {
+        [unroll]
+        for (int ox = -1; ox <= 1; ++ox)
+        {
+            const int2 candidateCell = clamp(int2(cell) + int2(ox, oy) * step,
+                                             int2(0, 0), int2((int)_FieldWidth - 1, (int)_FieldHeight - 1));
+            const float4 candidate = InputField.Load(int3(candidateCell, 0));
+            if (candidate.z < 0.0f || candidate.w < 0.0f || !ValidMotion(candidate.xy))
+                continue;
+
+            const float2 seedDisplayPosition = candidate.zw * displaySize / fieldSize;
+            const float candidatePreviousDepth =
+                LoadDepth(PreviousDepth, seedDisplayPosition + candidate.xy);
+            if (!DepthCompatible(targetPreviousDepth, candidatePreviousDepth))
+                continue;
+
+            const float2 delta = candidate.zw - (float2(cell) + 0.5f);
+            const float distanceToSeed = dot(delta, delta);
+            if (distanceToSeed < bestDistance)
+            {
+                best = candidate;
+                bestDistance = distanceToSeed;
+            }
+        }
+    }
+    OutputField[cell] = best;
+}
+)";
+
+class FsrFgBackgroundMvPyramid final : public Shader_Dx12
+{
+    static constexpr UINT FieldScale = 8;
+    static constexpr UINT MaxPasses = 16;
+
+    struct Constants
+    {
+        UINT fieldWidth = 0;
+        UINT fieldHeight = 0;
+        UINT displayWidth = 0;
+        UINT displayHeight = 0;
+        UINT mvWidth = 0;
+        UINT mvHeight = 0;
+        UINT depthWidth = 0;
+        UINT depthHeight = 0;
+        float mvScaleX = 1.0f;
+        float mvScaleY = 1.0f;
+        UINT mvLowResolution = 0;
+        float depthThreshold = 0.002f;
+        UINT mode = 0;
+        UINT step = 1;
+    };
+
+    static constexpr UINT ConstantDwords = sizeof(Constants) / sizeof(UINT);
+    static_assert(sizeof(Constants) % sizeof(UINT) == 0);
+
+    FrameDescriptorHeap _heaps[BUFFER_COUNT][MaxPasses];
+    ID3D12Resource* _fields[BUFFER_COUNT][2] {};
+    D3D12_RESOURCE_STATES _fieldStates[BUFFER_COUNT][2] {};
+
+    static void Transition(ID3D12GraphicsCommandList* commandList, ID3D12Resource* resource,
+                           D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    {
+        if (commandList == nullptr || resource == nullptr || before == after)
+            return;
+        D3D12_RESOURCE_BARRIER barrier {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.StateBefore = before;
+        barrier.Transition.StateAfter = after;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        commandList->ResourceBarrier(1, &barrier);
+    }
+
+    bool EnsureField(UINT slot, UINT index, ID3D12Resource* source, UINT width, UINT height)
+    {
+        if (source == nullptr || slot >= BUFFER_COUNT || index >= 2)
+            return false;
+
+        bool recreated = false;
+        if (_fields[slot][index] != nullptr)
+        {
+            const auto desc = _fields[slot][index]->GetDesc();
+            recreated = desc.Width != width || desc.Height != height || desc.Format != DXGI_FORMAT_R32G32B32A32_FLOAT;
+            if (recreated)
+            {
+                SAFE_RELEASE(_fields[slot][index]);
+                _fieldStates[slot][index] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            }
+        }
+
+        if (!CreateBufferResource(_device, source, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                  &_fields[slot][index], D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, width, height,
+                                  DXGI_FORMAT_R32G32B32A32_FLOAT))
+            return false;
+
+        if (recreated || _fieldStates[slot][index] == D3D12_RESOURCE_STATE_COMMON)
+            _fieldStates[slot][index] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        return true;
+    }
+
+    bool DispatchPass(ID3D12GraphicsCommandList* commandList, UINT slot, UINT pass, ID3D12Resource* motionVectors,
+                      ID3D12Resource* currentDepth, ID3D12Resource* previousDepth, ID3D12Resource* inputField,
+                      ID3D12Resource* outputField, D3D12_RESOURCE_STATES motionState,
+                      D3D12_RESOURCE_STATES currentDepthState, D3D12_RESOURCE_STATES previousDepthState,
+                      UINT fieldWidth, UINT fieldHeight, UINT displayWidth, UINT displayHeight, UINT mvWidth,
+                      UINT mvHeight, UINT depthWidth, UINT depthHeight, float mvScaleX, float mvScaleY,
+                      bool lowResolution, float depthThreshold, UINT mode, UINT step)
+    {
+        if (commandList == nullptr || slot >= BUFFER_COUNT || pass >= MaxPasses || outputField == nullptr)
+            return false;
+        auto& heap = _heaps[slot][pass];
+        if (heap.GetHeapCSU() == nullptr && !heap.Initialize(_device, 4, 1, 0))
+            return false;
+
+        try
+        {
+            CreateShaderResourceView(_device, motionVectors, heap.GetSrvCPU(0));
+            CreateShaderResourceView(_device, currentDepth, heap.GetSrvCPU(1));
+            CreateShaderResourceView(_device, previousDepth, heap.GetSrvCPU(2));
+            CreateShaderResourceView(_device, inputField != nullptr ? inputField : currentDepth, heap.GetSrvCPU(3));
+            CreateUnorderedAccessView(_device, outputField, heap.GetUavCPU(0), 0);
+        }
+        catch (const std::exception& error)
+        {
+            LOG_WARN("[FSRFG_BackgroundMvPyramid] Descriptor setup failed: {}", error.what());
+            return false;
+        }
+
+        Constants constants {};
+        constants.fieldWidth = fieldWidth;
+        constants.fieldHeight = fieldHeight;
+        constants.displayWidth = displayWidth;
+        constants.displayHeight = displayHeight;
+        constants.mvWidth = mvWidth;
+        constants.mvHeight = mvHeight;
+        constants.depthWidth = depthWidth;
+        constants.depthHeight = depthHeight;
+        constants.mvScaleX = std::isfinite(mvScaleX) ? mvScaleX : 1.0f;
+        constants.mvScaleY = std::isfinite(mvScaleY) ? mvScaleY : 1.0f;
+        constants.mvLowResolution = lowResolution ? 1u : 0u;
+        constants.depthThreshold = std::isfinite(depthThreshold) && depthThreshold > 0.0f ? depthThreshold : 0.002f;
+        constants.mode = mode;
+        constants.step = step;
+
+        Transition(commandList, motionVectors, motionState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Transition(commandList, currentDepth, currentDepthState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Transition(commandList, previousDepth, previousDepthState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Transition(commandList, outputField, _fieldStates[slot][outputField == _fields[slot][0] ? 0 : 1],
+                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        ID3D12DescriptorHeap* descriptorHeaps[] = { heap.GetHeapCSU() };
+        commandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
+        commandList->SetComputeRootSignature(_rootSignature);
+        commandList->SetPipelineState(_pipelineState);
+        commandList->SetComputeRootDescriptorTable(0, heap.GetTableGPUStart());
+        commandList->SetComputeRoot32BitConstants(1, ConstantDwords, &constants, 0);
+        commandList->Dispatch((fieldWidth + 7) / 8, (fieldHeight + 7) / 8, 1);
+
+        Transition(commandList, outputField, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        _fieldStates[slot][outputField == _fields[slot][0] ? 0 : 1] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        Transition(commandList, motionVectors, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, motionState);
+        Transition(commandList, currentDepth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, currentDepthState);
+        Transition(commandList, previousDepth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, previousDepthState);
+        return true;
+    }
+
+  public:
+    explicit FsrFgBackgroundMvPyramid(ID3D12Device* device) : Shader_Dx12("FSRFG_BackgroundMvPyramid", device)
+    {
+        if (device == nullptr || !SetupRootSignatureWithConstants(device, 4, 1, ConstantDwords))
+            return;
+        ID3DBlob* blob = CompileShader(fsrFgBackgroundMvPyramidShader, "CSMain", "cs_5_0");
+        if (blob == nullptr || !CreateComputeShader(device, _rootSignature, &_pipelineState, blob,
+                                                     D3D12_SHADER_BYTECODE {}))
+        {
+            SAFE_RELEASE(blob);
+            return;
+        }
+        SAFE_RELEASE(blob);
+        _init = true;
+    }
+
+    ~FsrFgBackgroundMvPyramid()
+    {
+        for (size_t slot = 0; slot < BUFFER_COUNT; ++slot)
+            for (size_t field = 0; field < 2; ++field)
+                SAFE_RELEASE(_fields[slot][field]);
+    }
+
+    ID3D12Resource* Build(ID3D12GraphicsCommandList* commandList, UINT slot, ID3D12Resource* motionVectors,
+                          ID3D12Resource* currentDepth, ID3D12Resource* previousDepth,
+                          D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES currentDepthState,
+                          D3D12_RESOURCE_STATES previousDepthState, UINT displayWidth, UINT displayHeight,
+                          float mvScaleX, float mvScaleY, bool lowResolution, float depthThreshold, UINT* outputWidth,
+                          UINT* outputHeight)
+    {
+        if (!_init || commandList == nullptr || slot >= BUFFER_COUNT || motionVectors == nullptr ||
+            currentDepth == nullptr || previousDepth == nullptr || displayWidth == 0 || displayHeight == 0)
+            return nullptr;
+
+        const UINT fieldWidth = std::max<UINT>(1, (displayWidth + FieldScale - 1) / FieldScale);
+        const UINT fieldHeight = std::max<UINT>(1, (displayHeight + FieldScale - 1) / FieldScale);
+        if (!EnsureField(slot, 0, motionVectors, fieldWidth, fieldHeight) ||
+            !EnsureField(slot, 1, motionVectors, fieldWidth, fieldHeight))
+            return nullptr;
+
+        const auto mvDesc = motionVectors->GetDesc();
+        const auto depthDesc = currentDepth->GetDesc();
+        const auto previousDepthDesc = previousDepth->GetDesc();
+        if (depthDesc.Width != previousDepthDesc.Width || depthDesc.Height != previousDepthDesc.Height)
+            return nullptr;
+
+        if (!DispatchPass(commandList, slot, 0, motionVectors, currentDepth, previousDepth, nullptr,
+                          _fields[slot][0], motionState, currentDepthState, previousDepthState, fieldWidth, fieldHeight,
+                          displayWidth, displayHeight, static_cast<UINT>(mvDesc.Width), mvDesc.Height,
+                          static_cast<UINT>(depthDesc.Width), depthDesc.Height, mvScaleX, mvScaleY, lowResolution,
+                          depthThreshold, 0, 1))
+            return nullptr;
+
+        UINT maxDimension = std::max(fieldWidth, fieldHeight);
+        UINT step = 1;
+        while (step < maxDimension)
+            step <<= 1;
+        step >>= 1;
+
+        UINT inputIndex = 0;
+        UINT pass = 1;
+        while (step != 0)
+        {
+            const UINT outputIndex = 1 - inputIndex;
+            if (!DispatchPass(commandList, slot, pass++, motionVectors, currentDepth, previousDepth,
+                              _fields[slot][inputIndex], _fields[slot][outputIndex], motionState, currentDepthState,
+                              previousDepthState, fieldWidth, fieldHeight, displayWidth, displayHeight,
+                              static_cast<UINT>(mvDesc.Width), mvDesc.Height, static_cast<UINT>(depthDesc.Width),
+                              depthDesc.Height, mvScaleX, mvScaleY, lowResolution, depthThreshold, 1, step))
+                return nullptr;
+            inputIndex = outputIndex;
+            step >>= 1;
+        }
+
+        if (outputWidth != nullptr)
+            *outputWidth = fieldWidth;
+        if (outputHeight != nullptr)
+            *outputHeight = fieldHeight;
+        return _fields[slot][inputIndex];
+    }
+};
+
 // Minimal peripheral baseline: one current/previous color pair and one game MV
 // sample per output pixel. The FSRFG real-frame ring supplies the previous source.
 static const char* fsrFgPeripheralReprojectionShader = R"(
@@ -182,6 +553,9 @@ cbuffer Params : register(b0)
     float _DepthThreshold;
     uint _DepthInverted;
     uint _ConservativeDepthFallback;
+    uint _BackgroundFieldWidth;
+    uint _BackgroundFieldHeight;
+    uint _BackgroundFieldValid;
 };
 
 Texture2D<float4> CurrentColor : register(t0);
@@ -190,6 +564,7 @@ Texture2D<float4> PreviousHudless : register(t2);
 Texture2D<float2> MotionVectors : register(t3);
 Texture2D<float> CurrentDepth : register(t4);
 Texture2D<float> PreviousDepth : register(t5);
+Texture2D<float4> BackgroundMotionField : register(t6);
 RWTexture2D<float4> OutputColor : register(u0);
 
 int2 ClampPixel(int2 p)
@@ -207,6 +582,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (p.x >= _RoiLeft && p.y >= _RoiTop && p.x < _RoiLeft + _RoiWidth && p.y < _RoiTop + _RoiHeight)
         return;
 
+    const float4 present = CurrentColor.Load(int3(p, 0));
+
     const float2 displaySize = float2((float)_Width, (float)_Height);
     const float2 mvSize = float2(max(_MvWidth, 1u), max(_MvHeight, 1u));
     const float2 fp = float2(p) + 0.5f;
@@ -218,7 +595,10 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     motion *= displaySize / (_MvLowResolution != 0 ? displaySize : mvSize);
 
     if (!all(isfinite(motion)) || any(abs(motion) > displaySize * 0.5f))
+    {
+        OutputColor[p] = present;
         return;
+    }
 
     const int2 currentPixel = ClampPixel(int2(floor(fp - motion * 0.5f)));
     const int2 previousPixel = ClampPixel(int2(floor(fp + motion * 0.5f)));
@@ -248,17 +628,46 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                               abs(outputCurrentDepth - currentDepth) <= coverageLimit;
     }
 
-    const float4 currentScene = CurrentHudless.Load(int3(currentPixel, 0));
-    const float4 previousScene = PreviousHudless.Load(int3(previousPixel, 0));
-    const float4 currentImage = CurrentHudless.Load(int3(p, 0));
-    const float4 reprojectedScene = depthValid
-                                        ? 0.5f * (currentScene + previousScene)
-                                        : (_ConservativeDepthFallback != 0
-                                               ? currentImage
-                                               : (currentIsFront ? (currentCoversOutput ? currentScene : previousScene)
-                                                                  : currentImage));
+    float4 currentScene = 0.0f;
+    float4 previousScene = 0.0f;
+    if (depthValid || (_ConservativeDepthFallback == 0 && currentIsFront))
+    {
+        currentScene = CurrentHudless.Load(int3(currentPixel, 0));
+        previousScene = PreviousHudless.Load(int3(previousPixel, 0));
+    }
+    if (!depthValid && _ConservativeDepthFallback == 0 && currentIsFront && !currentCoversOutput &&
+        _BackgroundFieldValid != 0 && _BackgroundFieldWidth != 0 && _BackgroundFieldHeight != 0)
+    {
+        const uint2 fieldPixel = min(uint2(fp * float2(_BackgroundFieldWidth, _BackgroundFieldHeight) /
+                                           displaySize),
+                                     uint2(_BackgroundFieldWidth - 1, _BackgroundFieldHeight - 1));
+        const float4 backgroundField = BackgroundMotionField.Load(int3(fieldPixel, 0));
+        if (backgroundField.z >= 0.0f && backgroundField.w >= 0.0f &&
+            all(isfinite(backgroundField.xy)) &&
+            all(abs(backgroundField.xy) <= displaySize * 0.5f))
+        {
+            const int2 backgroundPreviousPixel = ClampPixel(int2(floor(fp + backgroundField.xy * 0.5f)));
+            previousScene = PreviousHudless.Load(int3(backgroundPreviousPixel, 0));
+        }
+    }
+    float4 reprojectedScene;
+    if (depthValid)
+    {
+        reprojectedScene = 0.5f * (currentScene + previousScene);
+    }
+    else if (_ConservativeDepthFallback != 0)
+    {
+        reprojectedScene = CurrentHudless.Load(int3(p, 0));
+    }
+    else if (currentIsFront)
+    {
+        reprojectedScene = currentCoversOutput ? currentScene : previousScene;
+    }
+    else
+    {
+        reprojectedScene = CurrentHudless.Load(int3(p, 0));
+    }
 
-    const float4 present = CurrentColor.Load(int3(p, 0));
     const float4 hudless = CurrentHudless.Load(int3(p, 0));
     const float3 difference = abs(present.rgb - hudless.rgb);
     const float delta = max(max(difference.r, difference.g), difference.b);
@@ -288,6 +697,9 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
         float depthThreshold = 0.002f;
         UINT depthInverted = 0;
         UINT conservativeDepthFallback = 0;
+        UINT backgroundFieldWidth = 0;
+        UINT backgroundFieldHeight = 0;
+        UINT backgroundFieldValid = 0;
     };
 
     static constexpr UINT ConstantDwords = sizeof(Constants) / sizeof(UINT);
@@ -312,7 +724,7 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
   public:
     explicit FsrFgPeripheralReprojection(ID3D12Device* device) : Shader_Dx12("FSRFG_PeripheralReprojection", device)
     {
-        if (device == nullptr || !SetupRootSignatureWithConstants(device, 6, 1, ConstantDwords))
+        if (device == nullptr || !SetupRootSignatureWithConstants(device, 7, 1, ConstantDwords))
             return;
         ID3DBlob* blob = CompileShader(fsrFgPeripheralReprojectionShader, "CSMain", "cs_5_0");
         if (blob == nullptr || !CreateComputeShader(device, _rootSignature, &_pipelineState, blob,
@@ -324,7 +736,7 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
         SAFE_RELEASE(blob);
         for (auto& heap : _heaps)
         {
-            if (!heap.Initialize(device, 6, 1, 0))
+            if (!heap.Initialize(device, 7, 1, 0))
                 return;
         }
         _init = true;
@@ -346,7 +758,9 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
                   D3D12_RESOURCE_STATES motionState, D3D12_RESOURCE_STATES currentDepthState,
                   D3D12_RESOURCE_STATES previousDepthState, D3D12_RESOURCE_STATES outputState,
                   const FsrFgRoiRect& roi, float mvScaleX, float mvScaleY, bool lowResolution, float hudThreshold,
-                  float depthThreshold, bool invertedDepth, bool conservativeDepthFallback)
+                  float depthThreshold, bool invertedDepth, bool conservativeDepthFallback,
+                  ID3D12Resource* backgroundMotionField, UINT backgroundFieldWidth, UINT backgroundFieldHeight,
+                  D3D12_RESOURCE_STATES backgroundMotionFieldState)
     {
         if (!_init || commandList == nullptr || current == nullptr || currentHudless == nullptr ||
             previousHudless == nullptr || motionVectors == nullptr || currentDepth == nullptr ||
@@ -378,6 +792,8 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
             CreateShaderResourceView(_device, motionVectors, heap.GetSrvCPU(3));
             CreateShaderResourceView(_device, currentDepth, heap.GetSrvCPU(4));
             CreateShaderResourceView(_device, previousDepth, heap.GetSrvCPU(5));
+            CreateShaderResourceView(_device, backgroundMotionField != nullptr ? backgroundMotionField : currentDepth,
+                                    heap.GetSrvCPU(6));
             CreateUnorderedAccessView(_device, output, heap.GetUavCPU(0), 0);
         }
         catch (const std::exception& error)
@@ -404,6 +820,9 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
         constants.depthThreshold = std::isfinite(depthThreshold) && depthThreshold > 0.0f ? depthThreshold : 0.002f;
         constants.depthInverted = invertedDepth ? 1u : 0u;
         constants.conservativeDepthFallback = conservativeDepthFallback ? 1u : 0u;
+        constants.backgroundFieldWidth = backgroundMotionField != nullptr ? backgroundFieldWidth : 0u;
+        constants.backgroundFieldHeight = backgroundMotionField != nullptr ? backgroundFieldHeight : 0u;
+        constants.backgroundFieldValid = backgroundMotionField != nullptr ? 1u : 0u;
 
         Transition(commandList, current, currentState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Transition(commandList, currentHudless, currentHudlessState,
@@ -413,6 +832,9 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
         Transition(commandList, motionVectors, motionState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Transition(commandList, currentDepth, currentDepthState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Transition(commandList, previousDepth, previousDepthState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (backgroundMotionField != nullptr)
+            Transition(commandList, backgroundMotionField, backgroundMotionFieldState,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Transition(commandList, output, outputState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         ID3D12DescriptorHeap* descriptorHeaps[] = { heap.GetHeapCSU() };
@@ -432,6 +854,9 @@ class FsrFgPeripheralReprojection final : public Shader_Dx12
         Transition(commandList, motionVectors, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, motionState);
         Transition(commandList, currentDepth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, currentDepthState);
         Transition(commandList, previousDepth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, previousDepthState);
+        if (backgroundMotionField != nullptr)
+            Transition(commandList, backgroundMotionField, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                       backgroundMotionFieldState);
         return true;
     }
 };
@@ -880,6 +1305,54 @@ bool FSRFG_Dx12::CopyFull(ID3D12GraphicsCommandList* commandList, ID3D12Resource
     return true;
 }
 
+bool FSRFG_Dx12::CopyPeripheralRegions(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
+                                       D3D12_RESOURCE_STATES sourceState, ID3D12Resource* target,
+                                       D3D12_RESOURCE_STATES targetState, const FsrFgRoiRect& roi, UINT width,
+                                       UINT height)
+{
+    if (commandList == nullptr || source == nullptr || target == nullptr || width == 0 || height == 0)
+        return false;
+
+    const auto sourceDesc = source->GetDesc();
+    const auto targetDesc = target->GetDesc();
+    if (sourceDesc.Width != width || sourceDesc.Height != height || targetDesc.Width != width ||
+        targetDesc.Height != height || sourceDesc.Format != targetDesc.Format)
+        return false;
+
+    const UINT left = std::min(roi.left, width);
+    const UINT top = std::min(roi.top, height);
+    const UINT right = std::min(width, left + std::min(roi.width, width - left));
+    const UINT bottom = std::min(height, top + std::min(roi.height, height - top));
+
+    ResourceBarrier(commandList, source, sourceState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    ResourceBarrier(commandList, target, targetState, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = source;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = target;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.SubresourceIndex = 0;
+
+    auto copy = [&](UINT x, UINT y, UINT copyWidth, UINT copyHeight) {
+        if (copyWidth == 0 || copyHeight == 0)
+            return;
+        D3D12_BOX box { x, y, 0, x + copyWidth, y + copyHeight, 1 };
+        commandList->CopyTextureRegion(&dst, x, y, 0, &src, &box);
+    };
+
+    copy(0, 0, width, top);
+    copy(0, bottom, width, height - bottom);
+    copy(0, top, left, bottom - top);
+    copy(right, top, width - right, bottom - top);
+
+    ResourceBarrier(commandList, target, D3D12_RESOURCE_STATE_COPY_DEST, targetState);
+    ResourceBarrier(commandList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, sourceState);
+    return true;
+}
+
 bool FSRFG_Dx12::PrepareLocalInputResources(int index, ID3D12GraphicsCommandList* commandList,
                                             const FsrFgRoiRect& roi, UINT displayWidth, UINT displayHeight)
 {
@@ -1310,10 +1783,13 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                 const bool dedicatedUiReady =
                     dedicatedUi && IsResourceReady(FG_ResourceType::UIColor, fIndex) &&
                     !Config::Instance()->FGDisableUI.value_or_default();
+                const bool peripheralReprojectionEnabled =
+                    Config::Instance()->FSRFGROIPeripheralReprojection.value_or_default();
                 ID3D12Resource* hudlessResource = nullptr;
                 D3D12_RESOURCE_STATES hudlessState = D3D12_RESOURCE_STATE_COMMON;
                 bool currentHudlessReady = false;
-                if (!dedicatedUiReady && !Config::Instance()->FGDisableHudless.value_or_default() && hudless &&
+                if ((!dedicatedUiReady || peripheralReprojectionEnabled) &&
+                    !Config::Instance()->FGDisableHudless.value_or_default() && hudless &&
                     IsResourceReady(FG_ResourceType::HudlessColor, fIndex))
                 {
                     hudlessResource = hudless->GetResource();
@@ -1365,11 +1841,38 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                         previousDepthHistoryIndex = i;
                 }
 
+                // UIColor is a separate provider composition input. Keep capturing HUD-less when both are
+                // available so the peripheral path does not oscillate between temporal and placeholder output.
+                bool providerHudlessReady = currentHudlessReady && !dedicatedUiReady;
+                ID3D12Resource* reprojectionHudless = hudlessResource;
+                D3D12_RESOURCE_STATES reprojectionHudlessState = hudlessState;
+                bool reprojectionHudlessReady = currentHudlessReady;
+                bool hudlessGraceUsed = false;
+                if (!reprojectionHudlessReady && peripheralReprojectionEnabled &&
+                    !Config::Instance()->FGDisableHudless.value_or_default() &&
+                    previousHudlessHistoryIndex >= 0 &&
+                    CreateRoiSurface(_roiRealHudlessHistory[previousHudlessHistoryIndex], roi.width, roi.height,
+                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &_roiHudless[fIndex], false))
+                {
+                    reprojectionHudlessReady = CopyRoi(
+                        commandList, _roiRealHudlessHistory[previousHudlessHistoryIndex],
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, roi, _roiHudless[fIndex], roi.width,
+                        roi.height, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    if (reprojectionHudlessReady)
+                    {
+                        reprojectionHudless = _roiHudless[fIndex];
+                        reprojectionHudlessState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                        hudlessGraceUsed = true;
+                        LOG_DEBUG("FSR FG ROI HUD-less one-frame grace: frame={} sourceFrame={}", params->frameID,
+                                  _roiRealHudlessHistoryFrameId[previousHudlessHistoryIndex]);
+                    }
+                }
+
                 const bool providerHistoryMatches =
                     _roiProviderHistoryValid && _roiProviderHistoryFrameId + 1 == params->frameID &&
                     _roiProviderHistoryRect.left == roi.left && _roiProviderHistoryRect.top == roi.top &&
                     _roiProviderHistoryRect.width == roi.width && _roiProviderHistoryRect.height == roi.height &&
-                    _roiProviderHistoryUsedHudless == currentHudlessReady;
+                    _roiProviderHistoryUsedHudless == providerHudlessReady;
 
                 bool previousCropReady = false;
                 if (!providerHistoryMatches && previousHistoryIndex >= 0 &&
@@ -1384,7 +1887,7 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                 }
 
                 bool previousHudlessCropReady = false;
-                if (!providerHistoryMatches && currentHudlessReady && previousHudlessHistoryIndex >= 0 &&
+                if (!providerHistoryMatches && providerHudlessReady && previousHudlessHistoryIndex >= 0 &&
                     CreateRoiSurface(_roiRealHudlessHistory[previousHudlessHistoryIndex], roi.width, roi.height,
                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                      &_roiPreviousHudless[fIndex], false))
@@ -1420,7 +1923,7 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                 }
 
                 bool currentHudlessHistoryReady = false;
-                if (currentHudlessReady)
+                if (currentHudlessReady && (providerHudlessReady || peripheralReprojectionEnabled))
                 {
                     const auto hudlessDesc = hudlessResource->GetDesc();
                     currentHudlessHistoryReady =
@@ -1438,11 +1941,15 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                 }
                 else
                 {
-                    _roiRealHudlessHistoryValid[fIndex] = false;
+                    // Preserve the last real HUD-less frame for the bounded one-frame grace path. Do not advance
+                    // its frame ID here, otherwise a missing capture could be chained indefinitely.
+                    if (!currentHudlessReady)
+                        LOG_DEBUG("FSR FG ROI HUD-less unavailable: frame={} grace={}", params->frameID,
+                                  hudlessGraceUsed);
                 }
 
                 bool currentDepthHistoryReady = false;
-                if (Config::Instance()->FSRFGROIPeripheralReprojection.value_or_default())
+                if (peripheralReprojectionEnabled)
                 {
                     auto depth = GetResource(FG_ResourceType::Depth, fIndex);
                     auto* depthResource = depth ? depth->GetResource() : nullptr;
@@ -1469,7 +1976,10 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                 }
 
                 bool peripheralReprojectionReady = false;
-                if (Config::Instance()->FSRFGROIPeripheralReprojection.value_or_default() && currentHudlessReady &&
+                ID3D12Resource* backgroundMotionField = nullptr;
+                UINT backgroundFieldWidth = 0;
+                UINT backgroundFieldHeight = 0;
+                if (peripheralReprojectionEnabled && reprojectionHudlessReady &&
                     previousHudlessHistoryIndex >= 0 && currentDepthHistoryReady && previousDepthHistoryIndex >= 0)
                 {
                     auto velocity = GetResource(FG_ResourceType::Velocity, fIndex);
@@ -1481,47 +1991,77 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                         IsResourceReady(FG_ResourceType::Depth, fIndex) &&
                         CreateRoiSurface(presentColor, static_cast<UINT>(presentDesc.Width), presentDesc.Height,
                                          D3D12_RESOURCE_STATE_COPY_DEST, &_roiPeripheralOutput[fIndex], true) &&
-                        CopyFull(commandList, presentColor, presentState, _roiPeripheralOutput[fIndex],
-                                 D3D12_RESOURCE_STATE_COPY_DEST))
+                        presentDesc.Width == static_cast<UINT>(_physicalDisplayWidth) &&
+                        presentDesc.Height == _physicalDisplayHeight)
                     {
                         if (_peripheralReprojection == nullptr)
                             _peripheralReprojection = new FsrFgPeripheralReprojection(_device);
 
+                        const bool conservativeDepthFallback =
+                            Config::Instance()->FSRFGROIPeripheralDepthConservative.value_or_default();
+                        const bool useBackgroundMvPyramid =
+                            Config::Instance()->FSRFGROIPeripheralBackgroundMvPyramid.value_or_default() &&
+                            !conservativeDepthFallback;
+                        if (useBackgroundMvPyramid)
+                        {
+                            if (_backgroundMvPyramid == nullptr)
+                                _backgroundMvPyramid = new FsrFgBackgroundMvPyramid(_device);
+
+                            if (_backgroundMvPyramid != nullptr && _backgroundMvPyramid->IsInit())
+                            {
+                                backgroundMotionField = _backgroundMvPyramid->Build(
+                                    commandList, static_cast<UINT>(fIndex), motionVectors, depthResource,
+                                    _roiRealDepthHistory[previousDepthHistoryIndex], velocity->state, depth->state,
+                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                    static_cast<UINT>(presentDesc.Width), presentDesc.Height, _mvScaleX[fIndex],
+                                    _mvScaleY[fIndex], IsLowResMV(), 0.002f, &backgroundFieldWidth,
+                                    &backgroundFieldHeight);
+                                if (backgroundMotionField == nullptr)
+                                    LOG_DEBUG("FSR FG ROI background MV pyramid unavailable; using direct frame-0 "
+                                              "background fallback: frame={}",
+                                              params->frameID);
+                            }
+                        }
+
                         if (_peripheralReprojection != nullptr && _peripheralReprojection->IsInit())
                         {
                             peripheralReprojectionReady = _peripheralReprojection->Dispatch(
-                                commandList, presentColor, hudlessResource,
+                                commandList, presentColor, reprojectionHudless,
                                 _roiRealHudlessHistory[previousHudlessHistoryIndex], motionVectors,
                                 depthResource, _roiRealDepthHistory[previousDepthHistoryIndex],
-                                _roiPeripheralOutput[fIndex], presentState, hudlessState,
+                                _roiPeripheralOutput[fIndex], presentState, reprojectionHudlessState,
                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                 velocity->state, depth->state,
                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                 D3D12_RESOURCE_STATE_COPY_DEST, roi, _mvScaleX[fIndex], _mvScaleY[fIndex],
                                 IsLowResMV(), GetHudDetectionThreshold(), 0.002f, IsInvertedDepth(),
-                                Config::Instance()->FSRFGROIPeripheralDepthConservative.value_or_default());
+                                conservativeDepthFallback, backgroundMotionField, backgroundFieldWidth,
+                                backgroundFieldHeight, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                         }
 
                         if (peripheralReprojectionReady)
                         {
-                            CopyFull(commandList, _roiPeripheralOutput[fIndex], D3D12_RESOURCE_STATE_COPY_DEST,
-                                     physicalOutput, outputState);
+                            const bool copiedPeripheral = CopyPeripheralRegions(
+                                commandList, _roiPeripheralOutput[fIndex], D3D12_RESOURCE_STATE_COPY_DEST,
+                                physicalOutput, outputState, roi, static_cast<UINT>(presentDesc.Width),
+                                presentDesc.Height);
+                            if (!copiedPeripheral)
+                                LOG_WARN("FSR FG ROI peripheral region copy failed: frame={}", params->frameID);
                             LOG_DEBUG("FSR FG ROI UI-aware peripheral reprojection active: frame={} present={} "
                                       "hudless={} previousHudless={} mv={} depth={} previousDepth={} mvSize={}x{} "
                                       "depthSize={}x{} lowRes={} threshold={} depthThreshold={} "
                                       "depthReject=single-sample coverageCheck=current-depth depthInverted={} "
-                                      "depthPolicy={} "
+                                      "depthPolicy={} backgroundMvPyramid={} field={}x{} "
                                       "roi=({},{} {}x{})",
-                                      params->frameID, (size_t) presentColor, (size_t) hudlessResource,
+                                      params->frameID, (size_t) presentColor, (size_t) reprojectionHudless,
                                       (size_t) _roiRealHudlessHistory[previousHudlessHistoryIndex],
                                       (size_t) motionVectors, (size_t) depthResource,
                                       (size_t) _roiRealDepthHistory[previousDepthHistoryIndex],
                                       motionVectors->GetDesc().Width, motionVectors->GetDesc().Height,
                                       depthResource->GetDesc().Width, depthResource->GetDesc().Height, IsLowResMV(),
                                       GetHudDetectionThreshold(), 0.002f, IsInvertedDepth(),
-                                      Config::Instance()->FSRFGROIPeripheralDepthConservative.value_or_default()
-                                          ? "conservative"
-                                          : "front-preserve",
+                                      conservativeDepthFallback ? "conservative" : "front-preserve",
+                                      backgroundMotionField != nullptr, backgroundFieldWidth, backgroundFieldHeight,
                                       roi.left, roi.top, roi.width, roi.height);
                         }
                     }
@@ -1536,7 +2076,7 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                           "providerHistoryMatches={} previousRealFrame={} hudlessCurrent={} hudlessPrevious={} "
                           "periphery={}",
                           params->frameID, roi.width, roi.height, providerHistoryMatches, previousCropReady,
-                          currentHudlessReady, previousHudlessCropReady,
+                          providerHudlessReady, previousHudlessCropReady,
                           peripheralReprojectionReady ? "mv-reprojection" : "external-current-image-placeholder");
                 ffxDispatchDescFrameGeneration localParams = *params;
                 localParams.presentColor =
@@ -1546,7 +2086,7 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                 localParams.generationRect = { 0, 0, static_cast<int32_t>(roi.width), static_cast<int32_t>(roi.height) };
 
                 const bool previousSourceReady =
-                    previousCropReady && (!currentHudlessReady || previousHudlessCropReady);
+                    previousCropReady && (!providerHudlessReady || previousHudlessCropReady);
                 bool providerHistoryReady = providerHistoryMatches;
                 if (timingActive)
                     GazeRoiFrameSync::SetGpuTimingPrime(commandList, timingSlot,
@@ -1558,7 +2098,7 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                         ffxApiGetResourceDX12(_roiPreviousColor[fIndex], FFX_API_RESOURCE_STATE_COMPUTE_READ);
                     historyParams.reset = 1;
 
-                    const auto previousHudless = currentHudlessReady ? _roiPreviousHudless[fIndex] : nullptr;
+                    const auto previousHudless = providerHudlessReady ? _roiPreviousHudless[fIndex] : nullptr;
                     const bool historyConfigured = ConfigureLocalHudless(previousHudless, params->frameID);
                     const auto historyResult = historyConfigured
                                                    ? FfxApiProxy::D3D12_Dispatch(&_fgContext, &historyParams.header)
@@ -1569,13 +2109,13 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                               (UINT) historyResult);
                 }
 
-                if (!ConfigureLocalHudless(currentHudlessReady ? _roiHudless[fIndex] : nullptr, params->frameID))
+                if (!ConfigureLocalHudless(providerHudlessReady ? _roiHudless[fIndex] : nullptr, params->frameID))
                 {
-                    currentHudlessReady = false;
+                    providerHudlessReady = false;
                     providerHistoryReady = false;
                     ConfigureLocalHudless(nullptr, params->frameID);
                 }
-                _roiHudlessActive = currentHudlessReady;
+                _roiHudlessActive = providerHudlessReady;
 
                 if (!providerHistoryReady)
                 {
@@ -1595,7 +2135,7 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
                     _roiProviderHistoryFrameId = params->frameID;
                     _roiProviderHistoryRect = roi;
                     _roiProviderHistoryValid = true;
-                    _roiProviderHistoryUsedHudless = currentHudlessReady;
+                    _roiProviderHistoryUsedHudless = providerHudlessReady;
 
                     ResourceBarrier(commandList, _roiOutput[fIndex], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                     D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -2366,6 +2906,8 @@ void FSRFG_Dx12::ReleaseObjects()
 
     delete _peripheralReprojection;
     _peripheralReprojection = nullptr;
+    delete _backgroundMvPyramid;
+    _backgroundMvPyramid = nullptr;
 
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {

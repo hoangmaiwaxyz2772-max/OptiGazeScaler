@@ -21,6 +21,7 @@ struct FsrFgRoiRect
 };
 
 class FsrFgPeripheralReprojection;
+class FsrFgBackgroundMvPyramid;
 
 class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 {
@@ -79,6 +80,7 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     UINT _physicalDisplayHeight = 0;
     int _deferredPrepareIndex = -1;
     FsrFgPeripheralReprojection* _peripheralReprojection = nullptr;
+    FsrFgBackgroundMvPyramid* _backgroundMvPyramid = nullptr;
 
     static FfxApiResourceState GetFfxApiState(D3D12_RESOURCE_STATES state)
     {
@@ -129,6 +131,9 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
                  D3D12_RESOURCE_STATES targetState);
     bool CopyFull(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source, D3D12_RESOURCE_STATES sourceState,
                   ID3D12Resource* target, D3D12_RESOURCE_STATES targetState);
+    bool CopyPeripheralRegions(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
+                               D3D12_RESOURCE_STATES sourceState, ID3D12Resource* target,
+                               D3D12_RESOURCE_STATES targetState, const FsrFgRoiRect& roi, UINT width, UINT height);
     bool PrepareLocalInputResources(int index, ID3D12GraphicsCommandList* commandList, const FsrFgRoiRect& roi,
                                     UINT displayWidth, UINT displayHeight);
     void ReleaseLocalResources();
