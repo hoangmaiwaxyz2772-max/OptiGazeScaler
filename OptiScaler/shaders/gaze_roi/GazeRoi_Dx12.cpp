@@ -753,13 +753,13 @@ cbuffer Params : register(b0)
     float _PeripheralMotionVectorScaleY;
     int _PeripheralMotionVectorsLowResolution;
     int _PeripheralMotionVectorsJittered;
-    float _PreviousJitterOffsetX;
-    float _PreviousJitterOffsetY;
+    float _RoiSampleScaleX;
+    float _RoiSampleScaleY;
     int _MotionVectorDebugView;
     int _MotionVectorWidth;
     int _MotionVectorHeight;
-    float _MotionVectorScaleX;
-    float _MotionVectorScaleY;
+    float _RoiSampleBiasX;
+    float _RoiSampleBiasY;
     int _PeripheralResolveWidth;
     int _PeripheralResolveHeight;
     uint _DetailEnabled;
@@ -843,6 +843,28 @@ float4 ApplyPeripheralDetail(float4 color, float2 uv)
     return color;
 }
 
+// Final-composite aliases of temporal/MV slots; see DispatchComposite.
+// Work in pixel-center coordinates, then normalize for the ROI texture.
+float4 SampleDlssRoi(uint2 p)
+{
+    float2 localPixel = float2(p) - float2(_RoiX, _RoiY);
+    float2 scale = float2(_RoiSampleScaleX, _RoiSampleScaleY);
+    float2 bias = float2(_RoiSampleBiasX, _RoiSampleBiasY);
+    // Preserve the exact point load when the two grids already coincide.
+    float4 result = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    [branch]
+    if (all(scale == 1.0f) && all(bias == 0.0f))
+    {
+        result.rgb = DlssRoiOutput.Load(int3((int2)localPixel, 0)).rgb;
+    }
+    else
+    {
+        float2 roiUv = ((localPixel + 0.5f) * scale + bias) / float2(_RoiWidth, _RoiHeight);
+        result.rgb = DlssRoiOutput.SampleLevel(LinearClampSampler, roiUv, 0.0f).rgb;
+    }
+    return result;
+}
+
 float RoiAlpha(int2 p)
 {
     if (p.x < _RoiX || p.y < _RoiY || p.x >= _RoiX + _RoiWidth || p.y >= _RoiY + _RoiHeight)
@@ -868,7 +890,6 @@ float RoiAlpha(int2 p)
     int edgeDistance = min(min(left, right), min(top, bottom));
     return saturate((float)edgeDistance / (float)_FeatherPx);
 }
-
 [numthreads(16, 16, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
@@ -882,16 +903,14 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     if (alpha >= 1.0f)
     {
-        uint2 roiPixel = p - uint2((uint)_RoiX, (uint)_RoiY);
-        result = DlssRoiOutput.Load(int3(roiPixel, 0));
+        result = SampleDlssRoi(p);
     }
     else
     {
         float4 peripheral = ApplyPeripheralDetail(SamplePeripheral(uv), uv);
         if (alpha > 0.0f)
         {
-            uint2 roiPixel = p - uint2((uint)_RoiX, (uint)_RoiY);
-            float4 roi = DlssRoiOutput.Load(int3(roiPixel, 0));
+            float4 roi = SampleDlssRoi(p);
             result = lerp(peripheral, roi, alpha);
         }
         else
@@ -950,13 +969,13 @@ cbuffer Params : register(b0)
     float _PeripheralMotionVectorScaleY;
     int _PeripheralMotionVectorsLowResolution;
     int _PeripheralMotionVectorsJittered;
-    float _PreviousJitterOffsetX;
-    float _PreviousJitterOffsetY;
+    float _RoiSampleScaleX;
+    float _RoiSampleScaleY;
     int _MotionVectorDebugView;
     int _MotionVectorWidth;
     int _MotionVectorHeight;
-    float _MotionVectorScaleX;
-    float _MotionVectorScaleY;
+    float _RoiSampleBiasX;
+    float _RoiSampleBiasY;
     int _PeripheralResolveWidth;
     int _PeripheralResolveHeight;
     // Keep these scalar so HLSL packs them directly after the resolve size. A uint4
@@ -1138,6 +1157,28 @@ float3 Easu(uint2 outputPixel)
     return min(maximumColor, max(minimumColor, filtered));
 }
 
+// Final-composite aliases of temporal/MV slots; see DispatchComposite.
+// Work in pixel-center coordinates, then normalize for the ROI texture.
+float4 SampleDlssRoi(uint2 p)
+{
+    float2 localPixel = float2(p) - float2(_RoiX, _RoiY);
+    float2 scale = float2(_RoiSampleScaleX, _RoiSampleScaleY);
+    float2 bias = float2(_RoiSampleBiasX, _RoiSampleBiasY);
+    // Preserve the exact point load when the two grids already coincide.
+    float4 result = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    [branch]
+    if (all(scale == 1.0f) && all(bias == 0.0f))
+    {
+        result.rgb = DlssRoiOutput.Load(int3((int2)localPixel, 0)).rgb;
+    }
+    else
+    {
+        float2 roiUv = ((localPixel + 0.5f) * scale + bias) / float2(_RoiWidth, _RoiHeight);
+        result.rgb = DlssRoiOutput.SampleLevel(LinearClampSampler, roiUv, 0.0f).rgb;
+    }
+    return result;
+}
+
 float RoiAlpha(int2 p)
 {
     if (p.x < _RoiX || p.y < _RoiY || p.x >= _RoiX + _RoiWidth || p.y >= _RoiY + _RoiHeight)
@@ -1159,7 +1200,6 @@ float RoiAlpha(int2 p)
         bottom = _FeatherPx;
     return saturate((float)min(min(left, right), min(top, bottom)) / (float)_FeatherPx);
 }
-
 void WriteComposite(uint2 p)
 {
     if (p.x >= (uint)_DstWidth || p.y >= (uint)_DstHeight)
@@ -1169,14 +1209,14 @@ void WriteComposite(uint2 p)
     float4 result;
     if (alpha >= 1.0f)
     {
-        result = DlssRoiOutput.Load(int3(p - uint2((uint)_RoiX, (uint)_RoiY), 0));
+        result = SampleDlssRoi(p);
     }
     else
     {
         float4 peripheral = float4(Easu(p), 1.0f);
         if (alpha > 0.0f)
         {
-            float4 roi = DlssRoiOutput.Load(int3(p - uint2((uint)_RoiX, (uint)_RoiY), 0));
+            float4 roi = SampleDlssRoi(p);
             result = lerp(peripheral, roi, alpha);
         }
         else
@@ -4055,6 +4095,13 @@ bool GazeRoi_Dx12::DispatchComposite(ID3D12GraphicsCommandList* commandList,
         return false;
 
     GazeRoiConstants dispatchConstants = constants;
+    // Only the final composite aliases these unused temporal/MV slots. The
+    // peripheral passes and debug overlay still receive the original values.
+    // This avoids another constant buffer, root parameter or GPU dispatch.
+    dispatchConstants.previousJitterOffsetX = constants.roiSampleScaleX;
+    dispatchConstants.previousJitterOffsetY = constants.roiSampleScaleY;
+    dispatchConstants.motionVectorScaleX = constants.roiSampleBiasX;
+    dispatchConstants.motionVectorScaleY = constants.roiSampleBiasY;
     dispatchConstants.easuConst0[0] = peripheralDetail != nullptr ? 1u : 0u;
     dispatchConstants.easuConst0[1] = std::bit_cast<uint32_t>(peripheralDetailStrength);
     dispatchConstants.easuConst0[2] =

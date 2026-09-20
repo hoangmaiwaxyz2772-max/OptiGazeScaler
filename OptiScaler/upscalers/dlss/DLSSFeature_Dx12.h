@@ -22,15 +22,13 @@ class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
     GazeRoiRect _gazeRoiHandleOutputRect = {};
     std::string _gazeRoiHandleCreateSignature = {};
     bool _gazeRoiHandleWasCreated = false;
-    std::string _gazeRoiOptimalSignature = {};
     std::array<uint32_t, 6> _gazeRoiCreatePresetValues = {};
     bool _gazeRoiCreatePresetsCaptured = false;
-    uint32_t _gazeRoiOptimalWidth = 0;
-    uint32_t _gazeRoiOptimalHeight = 0;
-    uint32_t _gazeRoiOptimalMinWidth = 0;
-    uint32_t _gazeRoiOptimalMinHeight = 0;
-    uint32_t _gazeRoiOptimalMaxWidth = 0;
-    uint32_t _gazeRoiOptimalMaxHeight = 0;
+    uint32_t _gazeRoiCreateRenderWidth = 0;
+    uint32_t _gazeRoiCreateRenderHeight = 0;
+    // Full-frame dimensions, resource subrect origins and MV resolution mode.
+    // Resource pointers are deliberately excluded: games can rotate textures each frame.
+    std::array<uint32_t, 13> _gazePreviousFrameGeometry = {};
     GazeRoiRect _gazePreviousInputRect = {};
     GazeRoiRect _gazePreviousOutputRect = {};
     bool _gazeHasPreviousInputRect = false;
@@ -58,8 +56,7 @@ class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
     void UpdateVirtualGazePoint();
     bool BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& inputRect,
                           int configuredWidthPx, int configuredHeightPx);
-    bool ResolveGazeRoiOptimalInput(NVSDK_NGX_Parameter* InParameters, GazeRoiRect& outputRect,
-                                    GazeRoiRect& inputRect);
+    bool AlignGazeRoiInput(GazeRoiRect& outputRect, GazeRoiRect& inputRect);
     void CaptureGazeRoiCreatePresets(NVSDK_NGX_Parameter* InParameters);
     uint32_t GazeRoiCreatePresetValue(NVSDK_NGX_Parameter* InParameters, size_t index) const;
     bool EnsureGazeRoiMinimalParameters();

@@ -454,18 +454,28 @@ static uint32_t ScaleRoiDimension(uint32_t outputSize, uint32_t renderExtent, ui
     return static_cast<uint32_t>((scaled + targetExtent / 2) / targetExtent);
 }
 
-static uint32_t MapCenteredRectOrigin(uint32_t sourceOrigin, uint32_t sourceSize, uint32_t sourceExtent,
-                                      uint32_t targetSize, uint32_t targetExtent)
+// Continuous, clamped origin shared by rectangle placement and phase
+// compensation. Clamping must happen before computing the rounding residual,
+// otherwise touching a screen edge can turn it into a large translation.
+static double MapCenteredRectOriginContinuous(uint32_t sourceOrigin, uint32_t sourceSize,
+                                               uint32_t sourceExtent, uint32_t targetSize,
+                                               uint32_t targetExtent)
 {
     if (sourceExtent == 0 || targetExtent <= targetSize)
-        return 0;
+        return 0.0;
 
     const double sourceCenter = static_cast<double>(sourceOrigin) + static_cast<double>(sourceSize) * 0.5;
     const double mappedOrigin = sourceCenter * static_cast<double>(targetExtent) /
                                     static_cast<double>(sourceExtent) -
                                 static_cast<double>(targetSize) * 0.5;
-    return static_cast<uint32_t>(std::clamp<int64_t>(
-        static_cast<int64_t>(std::llround(mappedOrigin)), 0, static_cast<int64_t>(targetExtent - targetSize)));
+    return std::clamp(mappedOrigin, 0.0, static_cast<double>(targetExtent - targetSize));
+}
+
+static uint32_t MapCenteredRectOrigin(uint32_t sourceOrigin, uint32_t sourceSize, uint32_t sourceExtent,
+                                      uint32_t targetSize, uint32_t targetExtent)
+{
+    return static_cast<uint32_t>(std::llround(MapCenteredRectOriginContinuous(
+        sourceOrigin, sourceSize, sourceExtent, targetSize, targetExtent)));
 }
 
 enum class GazeRoiMotionVectorMode
@@ -969,6 +979,11 @@ bool DLSSFeatureDx12::InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
     if (NVNGXProxy::D3D12_CreateFeature() != nullptr)
     {
         ProcessInitParams(InParameters);
+        // NGX uses the feature's creation dimensions when evaluation does not
+        // specify a render subrect. Keep these separate from the last frame's
+        // dynamic dimensions and from the reusable game-owned parameter table.
+        _gazeRoiCreateRenderWidth = RenderWidth();
+        _gazeRoiCreateRenderHeight = RenderHeight();
         // Capture the effective create-time hints after OptiScaler has applied
         // its normal preset policy. The private ROI feature must use the same
         // model contract as the game-owned feature.
@@ -1049,12 +1064,11 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
 
         if (gazeRoiEnabled)
         {
+            // Keep the common jitter diagnostics. ROI resolves/validates its
+            // geometry independently below, without this helper's cached fallback.
             unsigned int renderWidth = 0;
             unsigned int renderHeight = 0;
             GetRenderResolution(InParameters, &renderWidth, &renderHeight);
-            LogGazeRoiContract(InParameters, "Replacement");
-            TraceNgxKnownParameters(InParameters, "original-input");
-
             const bool attempted = TryEvaluateGazeRoi(InCommandList, InParameters, nvResult);
             if (nvResult == NVSDK_NGX_Result_Success)
             {
@@ -1474,112 +1488,19 @@ bool DLSSFeatureDx12::EnsureGazeRoiMinimalParameters()
     return true;
 }
 
-bool DLSSFeatureDx12::ResolveGazeRoiOptimalInput(NVSDK_NGX_Parameter* InParameters,
-                                                 GazeRoiRect& outputRect, GazeRoiRect& inputRect)
+bool DLSSFeatureDx12::AlignGazeRoiInput(GazeRoiRect& outputRect, GazeRoiRect& inputRect)
 {
-    if (InParameters == nullptr || outputRect.width == 0 || outputRect.height == 0)
+    // BuildGazeRoiRects uses this frame's render/target dimensions. Preserve
+    // that ratio (apart from integer crop rounding). Optimal-settings callbacks
+    // describe a quality policy, sometimes OptiScaler's own, not the active
+    // render grid; replacing the crop with their recommendation changes scale.
+    // Let native feature creation/evaluation validate support for this size.
+    if (inputRect.width == 0 || inputRect.height == 0 ||
+        inputRect.width > RenderWidth() || inputRect.height > RenderHeight() ||
+        outputRect.width == 0 || outputRect.height == 0 ||
+        outputRect.width > TargetWidth() || outputRect.height > TargetHeight())
         return false;
 
-    const int perfQuality = GetNgxValue<int>(InParameters, NVSDK_NGX_Parameter_PerfQualityValue,
-                                             static_cast<int>(PerfQualityValue()));
-    void* callbackPointer = nullptr;
-    NVSDK_NGX_Result callbackLookupResult =
-        InParameters->Get(NVSDK_NGX_Parameter_DLSSOptimalSettingsCallback, &callbackPointer);
-    if (callbackLookupResult != NVSDK_NGX_Result_Success || callbackPointer == nullptr)
-    {
-        callbackPointer = nullptr;
-        callbackLookupResult =
-            InParameters->Get(NVSDK_NGX_EParameter_DLSSOptimalSettingsCallback, &callbackPointer);
-    }
-    const bool hasOptimalSettingsCallback =
-        callbackLookupResult == NVSDK_NGX_Result_Success && callbackPointer != nullptr;
-
-    std::ostringstream signature;
-    signature << outputRect.width << 'x' << outputRect.height << ":quality=" << perfQuality << ":render="
-              << RenderWidth() << 'x' << RenderHeight() << ":target=" << TargetWidth() << 'x' << TargetHeight()
-              << ":callback=" << hasOptimalSettingsCallback;
-    for (size_t index = 0; index < std::size(gazeRoiPresetKeys); ++index)
-        signature << ':' << GazeRoiCreatePresetValue(InParameters, index);
-
-    const std::string querySignature = signature.str();
-    if (_gazeRoiOptimalSignature != querySignature)
-    {
-        if (!hasOptimalSettingsCallback)
-        {
-            _gazeRoiOptimalWidth = inputRect.width;
-            _gazeRoiOptimalHeight = inputRect.height;
-            _gazeRoiOptimalMinWidth = inputRect.width;
-            _gazeRoiOptimalMinHeight = inputRect.height;
-            _gazeRoiOptimalMaxWidth = inputRect.width;
-            _gazeRoiOptimalMaxHeight = inputRect.height;
-            _gazeRoiOptimalSignature = querySignature;
-
-            LOG_INFO(
-                "[GROI_CONTRACT] optimal callback unavailable; using native-scale ROI input {}x{} -> {}x{} "
-                "from render={}x{} target={}x{}",
-                inputRect.width, inputRect.height, outputRect.width, outputRect.height, RenderWidth(),
-                RenderHeight(), TargetWidth(), TargetHeight());
-        }
-        else
-        {
-            using OptimalSettingsCallback = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Parameter*);
-            const auto callback = reinterpret_cast<OptimalSettingsCallback>(callbackPointer);
-
-            NgxParameterOverlay optimalParameters(InParameters, "optimal");
-            optimalParameters.SetOverride(NVSDK_NGX_Parameter_Width, outputRect.width);
-            optimalParameters.SetOverride(NVSDK_NGX_Parameter_Height, outputRect.height);
-            optimalParameters.SetOverride(NVSDK_NGX_Parameter_PerfQualityValue, perfQuality);
-            for (size_t index = 0; index < std::size(gazeRoiPresetKeys); ++index)
-                optimalParameters.SetOverride(gazeRoiPresetKeys[index],
-                                              GazeRoiCreatePresetValue(InParameters, index));
-
-            const NVSDK_NGX_Result queryResult = callback(&optimalParameters);
-            uint32_t optimalWidth = 0;
-            uint32_t optimalHeight = 0;
-            if (queryResult != NVSDK_NGX_Result_Success ||
-                optimalParameters.Get(NVSDK_NGX_Parameter_OutWidth, &optimalWidth) !=
-                    NVSDK_NGX_Result_Success ||
-                optimalParameters.Get(NVSDK_NGX_Parameter_OutHeight, &optimalHeight) !=
-                    NVSDK_NGX_Result_Success ||
-                optimalWidth == 0 || optimalHeight == 0)
-            {
-                LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_OPTIMAL_QUERY result={:X}",
-                          static_cast<unsigned int>(queryResult));
-                return false;
-            }
-
-            _gazeRoiOptimalWidth = optimalWidth;
-            _gazeRoiOptimalHeight = optimalHeight;
-            _gazeRoiOptimalMinWidth = GetNgxValue<unsigned int>(
-                &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, optimalWidth);
-            _gazeRoiOptimalMinHeight = GetNgxValue<unsigned int>(
-                &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, optimalHeight);
-            _gazeRoiOptimalMaxWidth = GetNgxValue<unsigned int>(
-                &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, optimalWidth);
-            _gazeRoiOptimalMaxHeight = GetNgxValue<unsigned int>(
-                &optimalParameters, NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, optimalHeight);
-            _gazeRoiOptimalSignature = querySignature;
-
-            LOG_INFO("[GROI_CONTRACT] optimal ROI {}x{} -> {}x{}, dynamic {}x{}..{}x{} quality={}",
-                     _gazeRoiOptimalWidth, _gazeRoiOptimalHeight, outputRect.width, outputRect.height,
-                     _gazeRoiOptimalMinWidth, _gazeRoiOptimalMinHeight, _gazeRoiOptimalMaxWidth,
-                     _gazeRoiOptimalMaxHeight, perfQuality);
-        }
-    }
-
-    if (_gazeRoiOptimalWidth < _gazeRoiOptimalMinWidth || _gazeRoiOptimalHeight < _gazeRoiOptimalMinHeight ||
-        _gazeRoiOptimalWidth > _gazeRoiOptimalMaxWidth || _gazeRoiOptimalHeight > _gazeRoiOptimalMaxHeight ||
-        _gazeRoiOptimalWidth > RenderWidth() || _gazeRoiOptimalHeight > RenderHeight())
-    {
-        LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_OPTIMAL_RANGE optimal={}x{} dynamic={}x{}..{}x{} render={}x{}",
-                  _gazeRoiOptimalWidth, _gazeRoiOptimalHeight, _gazeRoiOptimalMinWidth,
-                  _gazeRoiOptimalMinHeight, _gazeRoiOptimalMaxWidth, _gazeRoiOptimalMaxHeight, RenderWidth(),
-                  RenderHeight());
-        return false;
-    }
-
-    inputRect.width = _gazeRoiOptimalWidth;
-    inputRect.height = _gazeRoiOptimalHeight;
     constexpr uint32_t minimumRoiInputDimension = 64;
     if (inputRect.width < minimumRoiInputDimension || inputRect.height < minimumRoiInputDimension)
     {
@@ -1588,14 +1509,12 @@ bool DLSSFeatureDx12::ResolveGazeRoiOptimalInput(NVSDK_NGX_Parameter* InParamete
                   minimumRoiInputDimension);
         return false;
     }
-    const float outputCenterX = static_cast<float>(outputRect.x) + static_cast<float>(outputRect.width) * 0.5f;
-    const float outputCenterY = static_cast<float>(outputRect.y) + static_cast<float>(outputRect.height) * 0.5f;
-    const int32_t centeredInputX = static_cast<int32_t>(
-        std::round(outputCenterX * static_cast<float>(RenderWidth()) / static_cast<float>(TargetWidth()))) -
-                                   static_cast<int32_t>(inputRect.width / 2);
-    const int32_t centeredInputY = static_cast<int32_t>(
-        std::round(outputCenterY * static_cast<float>(RenderHeight()) / static_cast<float>(TargetHeight()))) -
-                                   static_cast<int32_t>(inputRect.height / 2);
+    const double outputCenterX = static_cast<double>(outputRect.x) + outputRect.width * 0.5;
+    const double outputCenterY = static_cast<double>(outputRect.y) + outputRect.height * 0.5;
+    const int32_t centeredInputX = static_cast<int32_t>(std::llround(
+        outputCenterX * RenderWidth() / TargetWidth() - inputRect.width * 0.5));
+    const int32_t centeredInputY = static_cast<int32_t>(std::llround(
+        outputCenterY * RenderHeight() / TargetHeight() - inputRect.height * 0.5));
     inputRect.x = static_cast<uint32_t>(
         std::clamp(centeredInputX, 0, static_cast<int32_t>(RenderWidth() - inputRect.width)));
     inputRect.y = static_cast<uint32_t>(
@@ -1799,20 +1718,6 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
     // game-owned table. MinimalPrivateParameters deliberately does not read or
     // forward them so this test isolates the documented DLSS SR core contract.
 
-    UpdateVirtualGazePoint();
-
-    GazeRoiRect outputRect {};
-    GazeRoiRect inputRect {};
-    if (!BuildGazeRoiRects(outputRect, inputRect,
-                           Config::Instance()->GazeRoiWidthPx.value_or_default(),
-                           Config::Instance()->GazeRoiHeightPx.value_or_default()))
-    {
-        LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_INVALID_ROI_RECT");
-        return false;
-    }
-    if (!ResolveGazeRoiOptimalInput(InParameters, outputRect, inputRect))
-        return false;
-
     const unsigned int featureFlags = GetNgxValue<unsigned int>(
         InParameters, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, static_cast<unsigned int>(GetFeatureFlags()));
     const bool lowResMotionVectors = (featureFlags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
@@ -1835,6 +1740,77 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
         InParameters, NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, 0);
     const uint32_t outputBaseY = GetNgxValue<unsigned int>(
         InParameters, NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, 0);
+
+    // Snapshot the evaluation geometry before any private create/evaluate can
+    // temporarily override the game-owned NGX table. Texture allocation sizes
+    // only validate this rectangle; padding/DRS allocations are not render sizes.
+    uint32_t frameRenderWidth = GetNgxValue<unsigned int>(
+        InParameters, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, 0);
+    uint32_t frameRenderHeight = GetNgxValue<unsigned int>(
+        InParameters, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, 0);
+    const bool useCreateDimensions = frameRenderWidth == 0 && frameRenderHeight == 0;
+    if (useCreateDimensions)
+    {
+        frameRenderWidth = _gazeRoiCreateRenderWidth;
+        frameRenderHeight = _gazeRoiCreateRenderHeight;
+    }
+    // Output size belongs to the active feature's creation contract, including
+    // OptiScaler output scaling. OutWidth/OutHeight in a reusable parameter table
+    // can also hold optimal-query results, so they must not override this target.
+    const uint32_t frameTargetWidth = TargetWidth();
+    const uint32_t frameTargetHeight = TargetHeight();
+    const uint32_t frameMvWidth = lowResMotionVectors ? frameRenderWidth : frameTargetWidth;
+    const uint32_t frameMvHeight = lowResMotionVectors ? frameRenderHeight : frameTargetHeight;
+    if (!ResourceRectFits(color, colorBaseX, colorBaseY, frameRenderWidth, frameRenderHeight) ||
+        !ResourceRectFits(depth, depthBaseX, depthBaseY, frameRenderWidth, frameRenderHeight) ||
+        !ResourceRectFits(motionVectors, originalMvBaseX, originalMvBaseY, frameMvWidth, frameMvHeight) ||
+        !ResourceRectFits(output, outputBaseX, outputBaseY, frameTargetWidth, frameTargetHeight))
+    {
+        LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_FRAME_GEOMETRY source={} render={}x{} target={}x{} "
+                  "bases=color({},{}) depth({},{}) mv({},{}) output({},{})",
+                  useCreateDimensions ? "feature-create" : "evaluate-subrect",
+                  frameRenderWidth, frameRenderHeight, frameTargetWidth, frameTargetHeight,
+                  colorBaseX, colorBaseY, depthBaseX, depthBaseY, originalMvBaseX, originalMvBaseY,
+                  outputBaseX, outputBaseY);
+        return false;
+    }
+    const std::array<uint32_t, 13> frameGeometry = {
+        frameRenderWidth, frameRenderHeight, frameTargetWidth, frameTargetHeight,
+        colorBaseX, colorBaseY, depthBaseX, depthBaseY, originalMvBaseX, originalMvBaseY,
+        outputBaseX, outputBaseY, featureFlags,
+    };
+    if (frameGeometry != _gazePreviousFrameGeometry)
+    {
+        // Even if rounded ROI dimensions happen to stay identical, the mapping
+        // and history belong to a different full-frame coordinate system.
+        _gazeHasPreviousInputRect = false;
+        if (_dlssNr != nullptr)
+            _dlssNr->InvalidateHistory();
+        LOG_INFO("[GROI_CONTRACT] frame geometry source={} render={}x{} target={}x{} scale={:.9f},{:.9f}; "
+                 "reset ROI/peripheral history",
+                 useCreateDimensions ? "feature-create" : "evaluate-subrect",
+                 frameRenderWidth, frameRenderHeight, frameTargetWidth, frameTargetHeight,
+                 static_cast<double>(frameTargetWidth) / frameRenderWidth,
+                 static_cast<double>(frameTargetHeight) / frameRenderHeight);
+    }
+    _renderWidth = frameRenderWidth;
+    _renderHeight = frameRenderHeight;
+
+    LogGazeRoiContract(InParameters, "Replacement");
+    TraceNgxKnownParameters(InParameters, "original-input");
+    UpdateVirtualGazePoint();
+
+    GazeRoiRect outputRect {};
+    GazeRoiRect inputRect {};
+    if (!BuildGazeRoiRects(outputRect, inputRect,
+                           Config::Instance()->GazeRoiWidthPx.value_or_default(),
+                           Config::Instance()->GazeRoiHeightPx.value_or_default()))
+    {
+        LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_INVALID_ROI_RECT");
+        return false;
+    }
+    if (!AlignGazeRoiInput(outputRect, inputRect))
+        return false;
 
     uint32_t roiColorBaseX = 0;
     uint32_t roiColorBaseY = 0;
@@ -2429,6 +2405,20 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
     constants.roiY = static_cast<int32_t>(outputRect.y);
     constants.roiWidth = static_cast<int32_t>(outputRect.width);
     constants.roiHeight = static_cast<int32_t>(outputRect.height);
+    // Preserve the existing ROI image scale and footprint. Only compensate
+    // the fractional output origin discarded by MapCenteredRectOrigin. The
+    // previous affine input-to-output remap could introduce a large scale or
+    // translation, causing clamp sampling to smear edge texels into bands.
+    // This residual is at most half an output pixel on either axis, including
+    // screen edges; it is not the difference between two crop extents.
+    constants.roiSampleScaleX = 1.0f;
+    constants.roiSampleScaleY = 1.0f;
+    constants.roiSampleBiasX = static_cast<float>(static_cast<double>(outputRect.x) -
+        MapCenteredRectOriginContinuous(inputRect.x, inputRect.width, RenderWidth(),
+                                        outputRect.width, TargetWidth()));
+    constants.roiSampleBiasY = static_cast<float>(static_cast<double>(outputRect.y) -
+        MapCenteredRectOriginContinuous(inputRect.y, inputRect.height, RenderHeight(),
+                                        outputRect.height, TargetHeight()));
     constants.featherPx = Config::Instance()->GazeRoiFeatherPx.value_or_default();
     constants.debugBorderPx = Config::Instance()->GazeRoiDebugBorder.value_or_default() ? 2 : 0;
     constants.peripheralBlur = peripheralBlur ? 1 : 0;
@@ -2496,6 +2486,7 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
 
     _gazePreviousInputRect = inputRect;
     _gazePreviousOutputRect = outputRect;
+    _gazePreviousFrameGeometry = frameGeometry;
     _gazeHasPreviousInputRect = true;
     _gazeDiagnosticOptionsInitialized = true;
     _gazePreviousCurrentColorPointBypass = currentColorPointBypass;

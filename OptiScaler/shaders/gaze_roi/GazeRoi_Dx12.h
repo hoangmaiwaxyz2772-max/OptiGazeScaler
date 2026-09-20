@@ -136,6 +136,13 @@ struct alignas(256) GazeRoiConstants
     uint32_t easuConst1[4] {};
     uint32_t easuConst2[4] {};
     uint32_t easuConst3[4] {};
+
+    // CPU-only metadata, packed into unused temporal/MV slots for the final
+    // composite. Keep the shared GPU root constants within the 64-DWORD limit.
+    float roiSampleScaleX = 1.0f;
+    float roiSampleScaleY = 1.0f;
+    float roiSampleBiasX = 0.0f;
+    float roiSampleBiasY = 0.0f;
 };
 
 struct alignas(256) GazeRoiMvConstants
