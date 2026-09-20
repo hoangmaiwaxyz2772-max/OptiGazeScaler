@@ -32,8 +32,12 @@ establish visual correctness in every game.
 The linear routes prepare SDR model input and restore model edits over the
 original image, preserving original HDR highlight energy when the SDR proxy
 cannot represent it. The HUDfix route uses display-image conversion instead:
-SDR avoids the scene filmic curve, while HDR uses a fixed 203-nit SDR reference
-with bounded highlight handling. HUDfix ignores game exposure.
+SDR avoids the scene filmic curve, while HDR uses **Input HDR -> SDR paper white (nits)**
+with bounded highlight handling. Match this to the game's paper white; the default
+is 203 nits and the range is 80–1000. The same white is used for HDR restoration
+and reduced-resolution reconstruction. Changing it resets the relevant histories.
+This setting is ignored for SDR captures and linear scene modes. HUDfix ignores
+game exposure. It is independent of the display-only preview white below.
 
 HUDfix capture uses OptiScaler's existing resource selection. **Capture index**,
 the **Resources** window and advanced capture exclusions are shared with
@@ -104,7 +108,8 @@ The **Direct output** menu follows the processing order:
 Choose **Off** for normal output. Previews replace the final screen image before
 Present and bypass game post-processing/UI; the OptiScaler overlay remains
 available. Model views preserve aspect ratio and use bilinear resizing. On HDR
-displays, **Preview SDR white** changes preview brightness only.
+displays, **Preview SDR -> HDR display white** changes preview brightness only, without
+changing HDR-to-SDR model input or normal game output.
 
 ## Scope and compatibility
 

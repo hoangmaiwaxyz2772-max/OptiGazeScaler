@@ -538,6 +538,7 @@ bool Config::Reload(std::filesystem::path iniPath)
                 readBool("DLSSNR", "DebugGlobalDownsampleOutput"));
             DLSSNRLegacyHDRTransfer.set_from_config(readBool("DLSSNR", "LegacyHDRTransfer"));
             DLSSNRHDRPaperWhite.set_from_config(readFloat("DLSSNR", "HDRPaperWhite"));
+            DLSSNRHudlessHDRPaperWhiteNits.set_from_config(readFloat("DLSSNR", "HudlessHDRPaperWhiteNits"));
             if (auto setting = readInt("DLSSNR", "WhitePointSource"); setting.has_value())
                 DLSSNRWhitePointSource.set_from_config(std::clamp(setting.value(), 0, 1));
             if (auto setting = readFloat("DLSSNR", "ExposureScale"); setting.has_value())
@@ -1480,6 +1481,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->DLSSNRLegacyHDRTransfer.value_for_config()).c_str());
         ini.SetValue("DLSSNR", "HDRPaperWhite",
                      GetFloatValue(Instance()->DLSSNRHDRPaperWhite.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "HudlessHDRPaperWhiteNits",
+                     GetFloatValue(Instance()->DLSSNRHudlessHDRPaperWhiteNits.value_for_config()).c_str());
         ini.SetValue("DLSSNR", "WhitePointSource",
                      GetIntValue(Instance()->DLSSNRWhitePointSource.value_for_config()).c_str());
         ini.SetValue("DLSSNR", "ExposureScale",

@@ -3428,7 +3428,7 @@ constexpr char kLowCompositeShader[] = R"(
 #endif
 cbuffer Params : register(b0) {
     uint2 HighSize; uint2 LowSize; uint2 BaseSource; uint2 DestinationBase;
-    uint CompositeMode; uint TemporalReconstruction; uint HighResolutionGuided; uint FeatureGuided; uint SourceScale; uint3 Padding1;
+    uint CompositeMode; uint TemporalReconstruction; uint HighResolutionGuided; uint FeatureGuided; uint SourceScale; uint DisplayHDR; float DisplayPaperWhite; uint CompositePadding;
 };
 Texture2D<float4> BaseColor : register(t0);
 Texture2D<float4> LowBaseline : register(t1);
@@ -3609,11 +3609,11 @@ float3 SolveAppearance(float3 diagonal, float3 off, float3 v, float ridge)
 }
 
 #if DLSSNR_DISPLAY_COMPOSITE
-// The late HDR adapter uses 80-nit scRGB units and a fixed 203-nit SDR white.
+// Match the input adapter's configurable paper white in 80-nit scRGB units.
 // Match the display restoration's shoulder, never a scene-radiance gain.
 float DisplayCompositeConfidence(float3 color)
 {
-    float peak = max(max(color.r, color.g), color.b) / (203.0 / 80.0);
+    float peak = max(max(color.r, color.g), color.b) / max(DisplayPaperWhite, 0.001);
     float shoulder = peak <= 0.75 ? peak : 0.75 + 0.25 * (peak - 0.75) / (peak - 0.5);
     return peak <= 0.75 ? 1.0 : smoothstep(0.1, 0.5, shoulder / max(peak, 1e-6));
 }
@@ -3654,7 +3654,7 @@ float3 SampleFeatureGuidedReconstruction(float2 p, float3 highColor, int2 cacheO
     float3 detailSourceSum = 0.0, detailDeltaSum = 0.0;
 #if DLSSNR_DISPLAY_COMPOSITE
     float3 observedMinimum = 65504.0, observedMaximum = -65504.0;
-    float displayConfidence = Padding1.x != 0u ? DisplayCompositeConfidence(high) : 1.0;
+    float displayConfidence = DisplayHDR != 0u ? DisplayCompositeConfidence(high) : 1.0;
 #endif
     float highMagnitude = length(high);
     float2 horizontalWeight[FeatureTaps];
@@ -3689,7 +3689,7 @@ float3 SampleFeatureGuidedReconstruction(float2 p, float3 highColor, int2 cacheO
                 sourceMagnitude = length(sample.rgb);
             }
 #if DLSSNR_DISPLAY_COMPOSITE
-            if (Padding1.x != 0u)
+            if (DisplayHDR != 0u)
             {
                 // A tiny highlight may disappear into a low-resolution cell.
                 // Its destination confidence must still protect the actual
@@ -3752,7 +3752,7 @@ float3 SampleFeatureGuidedReconstruction(float2 p, float3 highColor, int2 cacheO
     // colour direction, brightness-proportional relighting invents a gain that
     // was never produced by the model. Keep the fitted slopes/intercept where
     // observed, with an additive prior in ambiguous directions only.
-    if (Padding1.x != 0u) prior = 0.0;
+    if (DisplayHDR != 0u) prior = 0.0;
 #endif
     // Near-flat low images do not identify how independent illumination
     // should modulate unresolved source texture. Keep that direction near
@@ -3782,7 +3782,7 @@ float3 SampleFeatureGuidedReconstruction(float2 p, float3 highColor, int2 cacheO
                         float3(dot(crossR, solved), dot(crossG, solved), dot(crossB, solved));
 #if DLSSNR_DISPLAY_COMPOSITE
     float3 appliedCorrection = correction * unit;
-    if (Padding1.x != 0u)
+    if (DisplayHDR != 0u)
         appliedCorrection = clamp(appliedCorrection, observedMinimum, observedMaximum);
     float3 result = high + appliedCorrection;
 #else
@@ -4031,7 +4031,7 @@ float4 SampleSharpResidual(float2 p, float3 highColor, out float confidence)
         // Display-HDR inverse already restored this full-resolution model
         // against BaseColor. Adding base - bilinear(lowBaseline) again would
         // duplicate the source detail even for a model with no edit.
-        if (Padding1.x != 0u) result.rgb = Correction.Load(int3(id.xy, 0)).rgb;
+        if (DisplayHDR != 0u) result.rgb = Correction.Load(int3(id.xy, 0)).rgb;
 #endif
     } else {
         float4 correction = 0.0;
@@ -4054,7 +4054,7 @@ float4 SampleSharpResidual(float2 p, float3 highColor, out float confidence)
     }
     // Bound display edits using the same gamut projection as RestoreSDR.
     // A zero/negative source channel is not evidence that an edit is invalid.
-    if (Padding1.x != 0u && CompositeMode == 0u)
+    if (DisplayHDR != 0u && CompositeMode == 0u)
     {
 #if !DLSSNR_DISPLAY_COMPOSITE
         float low = min(min(base.r, base.g), base.b);
@@ -4064,7 +4064,7 @@ float4 SampleSharpResidual(float2 p, float3 highColor, out float confidence)
 #if DLSSNR_DISPLAY_COMPOSITE
         // Restoration bounds belong to the destination pixel, not only the
         // downsampled source. Applies to the legacy residual variants too.
-        float white = 203.0 / 80.0;
+        float white = max(DisplayPaperWhite, 0.001);
         float3 reference = base.rgb / white;
         float low = min(min(reference.r, reference.g), reference.b);
         if (low < 0.0) {
@@ -4469,6 +4469,7 @@ struct DLSSNRFeatureDx12::GuidanceResources
 {
     bool identityColorTransfer = false;
     bool displayHDRColorTransfer = false;
+    float displayPaperWhite = 203.0f / 80.0f;
     float ColorTransferStrength(float strength = 1.0f) const
     {
         // Existing constant slot: zero = encoded SDR, negative = display HDR,
@@ -4611,7 +4612,9 @@ struct DLSSNRFeatureDx12::GuidanceResources
         uint32_t highResolutionGuided;
         uint32_t featureGuided;
         uint32_t sourceScale;
-        uint32_t padding[3] {};
+        uint32_t displayHDR = 0;
+        float displayPaperWhite = 203.0f / 80.0f;
+        uint32_t padding = 0;
     };
 
     struct TemporalResidualConstants
@@ -4655,6 +4658,7 @@ struct DLSSNRFeatureDx12::GuidanceResources
     static_assert(sizeof(GlobalCropConstants) == kGuidanceConstantCount * sizeof(uint32_t));
     static_assert(sizeof(LowResidualConstants) == kGuidanceConstantCount * sizeof(uint32_t));
     static_assert(sizeof(LowCompositeConstants) == kGuidanceConstantCount * sizeof(uint32_t));
+    static_assert(offsetof(LowCompositeConstants, displayPaperWhite) == 14 * sizeof(uint32_t));
     static_assert(sizeof(TemporalResidualConstants) == kGuidanceConstantCount * sizeof(uint32_t));
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> resampleRoot;
@@ -6307,7 +6311,8 @@ struct DLSSNRFeatureDx12::GuidanceResources
                                           compositeMode, temporalReconstruction ? 1u : 0u,
                                           highResolutionGuided ? 1u : 0u,
                                           featureGuided ? 1u : 0u, std::max(sourceScale, 1u) };
-        constants.padding[0] = displayHDRColorTransfer ? 1u : 0u;
+        constants.displayHDR = displayHDRColorTransfer ? 1u : 0u;
+        constants.displayPaperWhite = displayPaperWhite;
         ID3D12DescriptorHeap* descriptorHeap = heaps[activeHeap].Get();
         commandList->SetDescriptorHeaps(1, &descriptorHeap);
         const bool useFastPipeline = fastReconstruction && featureGuided && compositeMode == 0 &&
@@ -7105,6 +7110,20 @@ bool DLSSNRFeatureDx12::Evaluate(ID3D12Device* device, ID3D12GraphicsCommandList
     }
 
     const auto& config = *Config::Instance();
+    float hudlessHDRPaperWhiteNits = config.DLSSNRHudlessHDRPaperWhiteNits.value_or_default();
+    hudlessHDRPaperWhiteNits = std::isfinite(hudlessHDRPaperWhiteNits)
+        ? std::clamp(hudlessHDRPaperWhiteNits, 80.0f, 1000.0f) : 203.0f;
+    if (domain == ColorDomain::DisplayLinearHDR &&
+        hudlessHDRPaperWhiteNits != _lastHudlessHDRPaperWhiteNits)
+    {
+        // Conversion, restoration and reconstruction share one frame snapshot.
+        // Histories trained under the old white must not bleed into the new input.
+        _lastHudlessHDRPaperWhiteNits = hudlessHDRPaperWhiteNits;
+        InvalidateHistory();
+        if (_guidance) _guidance->ResetTemporalHistory();
+        LOG_INFO("[DLSSNR_COLOR] HUDless HDR input paper white={:.1f} nits; reset history",
+                 hudlessHDRPaperWhiteNits);
+    }
     // Exposure/white-point adaptation credit: Dagherbou and OptiScaler_DLSSNR
     // contributors, https://github.com/Dagherbou/OptiScaler_DLSSNR.
     // See Licenses/OptiScaler_DLSSNR_ATTRIBUTION.txt for the pinned reference
@@ -7628,6 +7647,7 @@ bool DLSSNRFeatureDx12::Evaluate(ID3D12Device* device, ID3D12GraphicsCommandList
             _guidance = std::make_unique<GuidanceResources>();
         _guidance->identityColorTransfer = domain == ColorDomain::DisplaySDR;
         _guidance->displayHDRColorTransfer = domain == ColorDomain::DisplayLinearHDR;
+        _guidance->displayPaperWhite = hudlessHDRPaperWhiteNits / 80.0f;
         guidanceHelperReady = _guidance->EnsureInitialized(device) &&
             _guidance->EnsureTextures(device, debugInputView ? fullOutputWidth : outputWidth,
                                       debugInputView ? fullOutputHeight : outputHeight,
@@ -7853,7 +7873,7 @@ bool DLSSNRFeatureDx12::Evaluate(ID3D12Device* device, ID3D12GraphicsCommandList
     if (lowResolution && guidanceHelperReady)
     {
         const float paperWhite = domain == ColorDomain::DisplaySDR ? 1.0f :
-            domain == ColorDomain::DisplayLinearHDR ? 203.0f / 80.0f :
+            domain == ColorDomain::DisplayLinearHDR ? hudlessHDRPaperWhiteNits / 80.0f :
             config.DLSSNRHDRPaperWhite.value_or(2.044f);
         // A typed SRV load already exposes the game's native output as linear
         // float values. Read that validated subrect directly so both the
@@ -7900,7 +7920,7 @@ bool DLSSNRFeatureDx12::Evaluate(ID3D12Device* device, ID3D12GraphicsCommandList
     else if (hdrColorTransfer && guidanceHelperReady)
     {
         const float paperWhite = domain == ColorDomain::DisplaySDR ? 1.0f :
-            domain == ColorDomain::DisplayLinearHDR ? 203.0f / 80.0f :
+            domain == ColorDomain::DisplayLinearHDR ? hudlessHDRPaperWhiteNits / 80.0f :
             config.DLSSNRHDRPaperWhite.value_or(2.044f);
         constexpr float transferStrength = 1.0f;
         constexpr float colorStrength = 1.0f;
@@ -8261,7 +8281,7 @@ bool DLSSNRFeatureDx12::Evaluate(ID3D12Device* device, ID3D12GraphicsCommandList
     if (lowResolution)
     {
         const float paperWhite = domain == ColorDomain::DisplaySDR ? 1.0f :
-            domain == ColorDomain::DisplayLinearHDR ? 203.0f / 80.0f :
+            domain == ColorDomain::DisplayLinearHDR ? hudlessHDRPaperWhiteNits / 80.0f :
             config.DLSSNRHDRPaperWhite.value_or(2.044f);
         ID3D12Resource* residualColor = modelOutput.resource;
         bool residualColorWritable = modelOutput.state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -8517,7 +8537,7 @@ bool DLSSNRFeatureDx12::Evaluate(ID3D12Device* device, ID3D12GraphicsCommandList
     if (colorTransferPrepared)
     {
         const float paperWhite = domain == ColorDomain::DisplaySDR ? 1.0f :
-            domain == ColorDomain::DisplayLinearHDR ? 203.0f / 80.0f :
+            domain == ColorDomain::DisplayLinearHDR ? hudlessHDRPaperWhiteNits / 80.0f :
             config.DLSSNRHDRPaperWhite.value_or(2.044f);
         constexpr float transferStrength = 1.0f;
         constexpr float colorStrength = 1.0f;

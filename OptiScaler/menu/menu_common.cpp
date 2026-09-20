@@ -5913,6 +5913,17 @@ void MenuCommon::RenderDlssNrSettings(RenderMenuContext& ctx)
                        "Linear modes use the DLSS output before game post-processing, with automatic exposure or a manual white point. "
                        "Automatic exposure falls back to the configured manual white point if game exposure is unavailable.");
         const bool lateHudless = injectionMode == 0;
+        if (lateHudless)
+        {
+            float inputWhite = config->DLSSNRHudlessHDRPaperWhiteNits.value_or_default();
+            inputWhite = std::isfinite(inputWhite) ? std::clamp(inputWhite, 80.0f, 1000.0f) : 203.0f;
+            if (ImGui::SliderFloat("Input HDR -> SDR paper white (nits)", &inputWhite,
+                                   80.0f, 1000.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp))
+                config->DLSSNRHudlessHDRPaperWhiteNits = inputWhite;
+            ShowHelpMarker("Game paper white for HDR HUDfix captures, used to prepare the SDR model input and restore HDR output. "
+                           "Match the game's paper-white setting; default 203 nits. Higher values darken model input. "
+                           "Ignored for SDR captures. Independent of the SDR -> HDR preview display white below.");
+        }
         if (injectionMode == 1)
         {
             float exposureScale = config->DLSSNRExposureScale.value_or_default();
@@ -5952,9 +5963,9 @@ void MenuCommon::RenderDlssNrSettings(RenderMenuContext& ctx)
         if ((previewMode == 1 || previewMode == 2) && ctx.state.isHdrActive)
         {
             float previewWhite = config->DLSSNRPreviewWhiteNits.value_or_default();
-            if (ImGui::SliderFloat("Preview SDR white (nits)", &previewWhite, 80.0f, 400.0f, "%.0f"))
+            if (ImGui::SliderFloat("Preview SDR -> HDR display white (nits)", &previewWhite, 80.0f, 400.0f, "%.0f"))
                 config->DLSSNRPreviewWhiteNits = previewWhite;
-            ShowHelpMarker("Display brightness of the SDR preview on an HDR screen. Does not change model exposure or game brightness.");
+            ShowHelpMarker("Display-only paper white for SDR model previews on an HDR monitor. Does not change HDR -> SDR conversion, model input, or normal game output.");
         }
 
         if (lateHudless)

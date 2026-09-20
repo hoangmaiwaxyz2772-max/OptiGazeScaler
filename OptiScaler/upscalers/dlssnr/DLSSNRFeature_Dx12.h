@@ -99,6 +99,7 @@ class DLSSNRFeatureDx12
     bool _pendingReset = true;
     bool _lastSDRToneMapping = false;
     ColorDomain _lastColorDomain = ColorDomain::Scene;
+    float _lastHudlessHDRPaperWhiteNits = 203.0f;
     bool _lastFullResolutionGuidance = false;
     bool _debugInputViewCompositeDisabledLogged = false;
     bool _lastTemporalResidualReconstruction = false;

@@ -318,6 +318,7 @@ LateHudless=false
 WhitePointSource=1
 ExposureScale=1.0
 HDRPaperWhite=auto
+HudlessHDRPaperWhiteNits=203.0
 LowResolutionScale=auto
 FastReconstruction=true
 GazeRoiEnabled=false
@@ -340,6 +341,7 @@ PreviewWhiteNits=203.0
 | `WhitePointSource` | 1 selects automatic game exposure; 0 selects manual reference white. Ignored for HUDfix display-image input. |
 | `ExposureScale` | Automatic exposure trim, default 1.0; applied as `PreExposure * ExposureScale / ExposureTexture`. |
 | `HDRPaperWhite` | Manual reference white, also the fallback for invalid/missing game exposure. `auto` uses 2.044 scene units. Increasing it darkens model input. |
+| `HudlessHDRPaperWhiteNits` | Game paper white for HUDfix HDR-to-SDR model input and matching HDR restoration/reconstruction. Default 203 nits, range 80–1000. Match the game's paper white; higher values darken model input. Ignored for SDR captures and linear scene modes. Independent of `PreviewWhiteNits`. |
 | `LowResolutionScale` | Full-frame model resolution: `auto`/0/1 uses full resolution; 2 and 3 reduce each dimension to approximately one half or one third. |
 | `FastReconstruction` | Default true: fast 3×3 reconstruction of reduced-resolution model changes. False selects the 5×5 Debug fallback. |
 | `GazeRoiEnabled` | Restrict NR to its own gaze rectangle. Independent of `[GazeRoi] Enabled`. |

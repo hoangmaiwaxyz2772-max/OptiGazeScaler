@@ -488,6 +488,9 @@ class Config
     // Direct output: 0 = off, 1 = model input, 2 = model output, 3 = HUDfix scene.
     CustomOptional<uint32_t> DLSSNRPresentPreview { 0 };
     CustomOptional<float> DLSSNRPreviewWhiteNits { 203.0f };
+    // Game paper white for HUDless display-HDR -> SDR model input, in nits.
+    // Independent of the display-only SDR preview white and scene exposure.
+    CustomOptional<float> DLSSNRHudlessHDRPaperWhiteNits { 203.0f };
     // Diagnostic A/B: construct the model Color by downsampling the complete
     // DLSS output first, then crop the gaze ROI from that fixed full-frame grid.
     CustomOptional<bool> DLSSNRDebugGlobalDownsampleOutput { false };
