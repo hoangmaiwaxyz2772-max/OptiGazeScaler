@@ -1,6 +1,7 @@
 #pragma once
 #include "DLSSDFeature.h"
 #include <upscalers/IFeature_Dx12.h>
+#include <upscalers/dlssnr/DLSSNRFeature_Dx12.h>
 #include <shaders/rcas/RCAS_Dx12.h>
 #include <shaders/ray_reconstruction_debug/RayReconstructionBypass_Dx12.h>
 #include <shaders/ray_reconstruction_debug/RayReconstructionPeripheralDenoiser_Dx12.h>
@@ -13,6 +14,7 @@ class DLSSDFeatureDx12 : public DLSSDFeature, public IFeature_Dx12
   private:
     std::unique_ptr<RayReconstructionBypassDx12> _rawColorBypass;
     std::unique_ptr<RayReconstructionPeripheralDenoiserDx12> _peripheralDenoiser;
+    std::unique_ptr<DLSSNRFeatureDx12> _dlssNr;
     bool _rawColorBypassWasEnabled = false;
     bool _peripheralDenoiserWasEnabled = false;
     float _previousJitterOffsetX = 0.0f;
@@ -36,7 +38,8 @@ class DLSSDFeatureDx12 : public DLSSDFeature, public IFeature_Dx12
     float _gazePreviousJitterOffsetX = 0.0f;
     float _gazePreviousJitterOffsetY = 0.0f;
     void UpdateGazePoint();
-    bool BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& inputRect);
+    bool BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& inputRect,
+                          int configuredWidthPx, int configuredHeightPx);
     bool EnsureGazeRoiRrHandle(ID3D12GraphicsCommandList* commandList, NVSDK_NGX_Parameter* parameters,
                                const GazeRoiRect& outputRect, const GazeRoiRect& inputRect);
     void LogGazeRoiNativeResources(NVSDK_NGX_Parameter* parameters);
@@ -48,6 +51,7 @@ class DLSSDFeatureDx12 : public DLSSDFeature, public IFeature_Dx12
   public:
     bool InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
     bool EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
+    bool BuildDlssNrGazeRegion(DLSSNRFeatureDx12::FoveatedRegion& region);
 
     feature_version Version() override { return DLSSDFeature::Version(); }
     Upscaler GetUpscalerType() const final { return DLSSDFeature::GetUpscalerType(); }

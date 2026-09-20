@@ -6,6 +6,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <resource_tracking/ResTrack_dx12.h>
+#include <hooks/GazeRoiStreamlineContext.h>
 
 #include <atomic>
 #include <chrono>
@@ -1014,6 +1015,33 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     }
 
     NVSDK_NGX_Result nvResult;
+    const auto evaluateDlssNr = [&]()
+    {
+        if (!Config::Instance()->DLSSNREnabled.value_or_default())
+        {
+            if (_dlssNr != nullptr)
+                _dlssNr->InvalidateHistory();
+            return;
+        }
+        if (_dlssNr == nullptr)
+            _dlssNr = std::make_unique<DLSSNRFeatureDx12>();
+
+        DLSSNRFeatureDx12::FoveatedRegion region {};
+        const bool useGazeRegion = Config::Instance()->DLSSNRGazeRoiEnabled.value_or_default() &&
+                                   BuildDlssNrGazeRegion(region);
+        const int configuredScale = std::clamp(Config::Instance()->DLSSNRGazeRoiScale.value_or_default(), 1, 3);
+        if (configuredScale > 1)
+        {
+            if (useGazeRegion)
+                LOG_DEBUG("[DLSSNR_GROI] region output={}x{}+{},{} input={}x{}+{},{} scale={}",
+                          region.outputWidth, region.outputHeight, region.outputX, region.outputY,
+                          region.inputWidth, region.inputHeight, region.inputX, region.inputY, configuredScale);
+            else
+                LOG_DEBUG("[DLSSNR] full-frame render scale={} (no gaze ROI)", configuredScale);
+        }
+        _dlssNr->Evaluate(Device, InCommandList, InParameters, TargetWidth(), TargetHeight(), DepthInverted(),
+                          useGazeRegion ? &region : nullptr);
+    };
 
     if (NVNGXProxy::D3D12_EvaluateFeature() != nullptr)
     {
@@ -1031,6 +1059,7 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
             if (nvResult == NVSDK_NGX_Result_Success)
             {
                 LogGazeRoiDecision("GROI_ACCEPT_REPLACEMENT");
+                evaluateDlssNr();
                 _frameCount++;
                 return true;
             }
@@ -1051,6 +1080,9 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
             LOG_ERROR("_EvaluateFeature result: {0:X}", (unsigned int) nvResult);
             return false;
         }
+
+        // Full-frame NR runs after ordinary DLSS and before downstream frame-generation capture.
+        evaluateDlssNr();
     }
     else
     {
@@ -1278,7 +1310,8 @@ void DLSSFeatureDx12::UpdateVirtualGazePoint()
     _gazePointY = std::clamp(_gazePointY, 0.0f, 1.0f);
 }
 
-bool DLSSFeatureDx12::BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& inputRect)
+bool DLSSFeatureDx12::BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& inputRect,
+                                     int configuredWidthPx, int configuredHeightPx)
 {
     const uint32_t targetWidth = TargetWidth();
     const uint32_t targetHeight = TargetHeight();
@@ -1298,9 +1331,9 @@ bool DLSSFeatureDx12::BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& in
         return static_cast<uint32_t>(std::clamp(configured, static_cast<int>(minimum), upper));
     };
     const uint32_t desiredOutputWidth =
-        clampConfiguredDimension(Config::Instance()->GazeRoiWidthPx.value_or_default(), targetWidth);
+        clampConfiguredDimension(configuredWidthPx, targetWidth);
     const uint32_t desiredOutputHeight =
-        clampConfiguredDimension(Config::Instance()->GazeRoiHeightPx.value_or_default(), targetHeight);
+        clampConfiguredDimension(configuredHeightPx, targetHeight);
 
     outputRect.width = desiredOutputWidth;
     outputRect.height = desiredOutputHeight;
@@ -1339,6 +1372,57 @@ bool DLSSFeatureDx12::BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& in
     outputRect.width = std::min(outputRect.width, targetWidth - outputRect.x);
     outputRect.height = std::min(outputRect.height, targetHeight - outputRect.y);
     return inputRect.width > 0 && inputRect.height > 0 && outputRect.width > 0 && outputRect.height > 0;
+}
+
+bool DLSSFeatureDx12::BuildDlssNrGazeRegion(DLSSNRFeatureDx12::FoveatedRegion& region)
+{
+    // Keep the input source identical to the normal DLSS ROI controls. This is
+    // intentionally independent from GazeRoiEnabled: NR may be the only
+    // consumer of the gaze point.
+    // Streamline's active evaluation context is the authoritative gaze
+    // annotation when a game supplies one. Fall back to the existing local
+    // mouse/keyboard/shared-memory/UDP source for games without that tag.
+    if (const auto* context = GazeRoiStreamlineContext::Current(); context != nullptr && context->active)
+    {
+        _gazePointX = std::clamp(context->gazeX, 0.0f, 1.0f);
+        _gazePointY = std::clamp(context->gazeY, 0.0f, 1.0f);
+        if (context->recentered)
+            _gazeHasPreviousInputRect = false;
+    }
+    else
+    {
+        UpdateVirtualGazePoint();
+    }
+    GazeRoiRect outputRect {};
+    GazeRoiRect inputRect {};
+    if (!BuildGazeRoiRects(outputRect, inputRect,
+                           Config::Instance()->DLSSNRGazeRoiWidthPx.value_or_default(),
+                           Config::Instance()->DLSSNRGazeRoiHeightPx.value_or_default()))
+        return false;
+
+    // Color is cropped from the completed DLSS output, while Depth and
+    // low-resolution MVs are cropped on the render grid.  This remains true
+    // when the model input is subsequently reduced to one half or one third.
+    // BuildGazeRoiRects snaps those two grids independently, which can move
+    // Color by one output pixel while the guide crop remains unchanged.  Use
+    // the snapped guide rect as the temporal authority so both crops advance
+    // together before Color, Depth and MV are resampled into the common NR
+    // work grid.  The guide resample separately converts MV values into that
+    // grid's pixel units; it must not establish a second crop origin.
+    outputRect.x = MapCenteredRectOrigin(inputRect.x, inputRect.width, RenderWidth(), outputRect.width,
+                                         TargetWidth());
+    outputRect.y = MapCenteredRectOrigin(inputRect.y, inputRect.height, RenderHeight(), outputRect.height,
+                                         TargetHeight());
+
+    region.outputX = outputRect.x;
+    region.outputY = outputRect.y;
+    region.outputWidth = outputRect.width;
+    region.outputHeight = outputRect.height;
+    region.inputX = inputRect.x;
+    region.inputY = inputRect.y;
+    region.inputWidth = inputRect.width;
+    region.inputHeight = inputRect.height;
+    return true;
 }
 
 void DLSSFeatureDx12::CaptureGazeRoiCreatePresets(NVSDK_NGX_Parameter* InParameters)
@@ -1719,7 +1803,9 @@ bool DLSSFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* InCommandLis
 
     GazeRoiRect outputRect {};
     GazeRoiRect inputRect {};
-    if (!BuildGazeRoiRects(outputRect, inputRect))
+    if (!BuildGazeRoiRects(outputRect, inputRect,
+                           Config::Instance()->GazeRoiWidthPx.value_or_default(),
+                           Config::Instance()->GazeRoiHeightPx.value_or_default()))
     {
         LOG_ERROR("[GROI_CONTRACT] GROI_FAIL_INVALID_ROI_RECT");
         return false;
@@ -2472,6 +2558,9 @@ DLSSFeatureDx12::DLSSFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter* I
 
 DLSSFeatureDx12::~DLSSFeatureDx12()
 {
+    if (_dlssNr != nullptr)
+        _dlssNr->Shutdown(Device);
+
     if (State::Instance().isShuttingDown)
         return;
 

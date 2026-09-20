@@ -302,6 +302,94 @@ These can be changed from the in-game menu with real-time results.
 
 ![init flags](images/init_flags.png)
 
+### DLSS5 / DLSS NR (D3D12)
+
+`[DLSSNR]` controls the external neural-rendering module on the D3D12 DLSS SR
+and Ray Reconstruction paths. It supports full-frame processing and an
+independent gaze ROI. Open **DLSS5 / NR** in the main overlay for common
+settings. See the [DLSS5 guide](docs/DLSS5.md) for setup, algorithm behaviour
+and limitations, and [CREDITS.md](CREDITS.md) for source attribution.
+
+```ini
+[DLSSNR]
+Enabled=false
+LibraryPath=auto
+LateHudless=false
+WhitePointSource=1
+ExposureScale=1.0
+HDRPaperWhite=auto
+LowResolutionScale=auto
+FastReconstruction=true
+GazeRoiEnabled=false
+GazeRoiWidthPx=1280
+GazeRoiHeightPx=720
+GazeRoiScale=1
+GazeRoiEdgeBlendPx=96
+GazeRoiExtrapolation=false
+GazeRoiExtrapolationDistancePx=512
+OutputTemporalStabilization=false
+PresentPreview=0
+PreviewWhiteNits=203.0
+```
+
+| Setting | Meaning |
+| --- | --- |
+| `Enabled` | Enable external NR. Default false; unavailable modules/resources cause a logged skip. |
+| `LibraryPath` | `auto` searches beside OptiScaler for `nvngx_dlssnr.dll`, then `nvngx.dll_dlssnr.dll`. The module is not bundled. An explicit path overrides discovery; restart after changing it. |
+| `LateHudless` | True selects **After post-processing (HUDfix)**. False uses linear DLSS output and `WhitePointSource`. Default false. |
+| `WhitePointSource` | 1 selects automatic game exposure; 0 selects manual reference white. Ignored for HUDfix display-image input. |
+| `ExposureScale` | Automatic exposure trim, default 1.0; applied as `PreExposure * ExposureScale / ExposureTexture`. |
+| `HDRPaperWhite` | Manual reference white, also the fallback for invalid/missing game exposure. `auto` uses 2.044 scene units. Increasing it darkens model input. |
+| `LowResolutionScale` | Full-frame model resolution: `auto`/0/1 uses full resolution; 2 and 3 reduce each dimension to approximately one half or one third. |
+| `FastReconstruction` | Default true: fast 3×3 reconstruction of reduced-resolution model changes. False selects the 5×5 Debug fallback. |
+| `GazeRoiEnabled` | Restrict NR to its own gaze rectangle. Independent of `[GazeRoi] Enabled`. |
+| `GazeRoiWidthPx`, `GazeRoiHeightPx` | NR output-space dimensions, 64–8192 per axis and clipped to output. Defaults 1280×720. Old INI files missing these keys inherit the DLSS ROI size once for compatibility; explicit `auto` uses the NR defaults and subsequent saved settings are independent. |
+| `GazeRoiScale` | Model resolution within the NR ROI: 1, 2 or 3. Independent of full-frame `LowResolutionScale`. |
+| `GazeRoiEdgeBlendPx` | Inward model/original blend width in output pixels, default 96; bounded by ROI dimensions. |
+| `GazeRoiExtrapolation` | Enable colour-supported local ROI edge correction. Default false; requires nonzero edge blend. |
+| `GazeRoiExtrapolationDistancePx` | Maximum exterior reach, 0–512 px, default 512. Zero removes exterior correction. Decay has a fixed 192 px half-weight distance and a smooth outer fade. |
+| `OutputTemporalStabilization` | Optional stabilization of model output, default false. Separate from edge correction's own bounded coefficient history. |
+| `PresentPreview` | 0 = normal output, 3 = captured HUDfix scene, 1 = SDR model input, 2 = SDR model output. The menu orders these by processing stage. Mode 3 requires HUDfix. |
+| `PreviewWhiteNits` | SDR model-preview brightness on HDR displays, default 203 nits. Does not alter model exposure or normal output. |
+
+The shared gaze source is selected under **Gaze ROI Control** or `[GazeRoi]`.
+DLSS SR and NR dimensions are edited and applied separately. See the
+[gaze guide](docs/GazeROI.md) and [external input protocol](docs/GazeRoiExternalInput.md).
+
+For HUDfix injection, the capture index, resource selector and advanced
+exclusions are shared with OptiFG. Frame generation can remain off. No usable
+capture means NR is skipped for that frame. Only this injection mode exposes
+the capture controls. If NR was disabled at startup, save the enabled setting
+and restart to initialize descriptor tracking for existing resources.
+
+The linear routes encode SDR model input and restore the model's change over
+the original scene. HUDfix uses display-image conversion and does not apply
+game exposure. Direct output previews run before Present, bypass game
+post-processing/UI and retain the OptiScaler overlay.
+
+Edge correction uses colour/hue/brightness support, spatially smoothed local
+fits and bounded history with a 0.55 maximum coefficient weight. History is
+suppressed at the ROI boundary and during large gaze movement. Its strength
+ramps with exterior distance, so the immediate boundary remains responsive.
+The removed `GazeRoiTone` and `GazeRoiToneDistancePx` keys are ignored and are
+deleted when saving. There is no independent surrounding-tone stage.
+
+Advanced/debug keys remain for diagnosis: `FullResolutionGuidance`,
+`LowResolutionFullOutput`, `TemporalResidualReconstruction`,
+`HighResolutionGuidedResidual`, `LegacyResidualReconstruction`,
+`LowResolutionOriginalMVec`, `LowResolutionMVecScale`, `CloneTypelessDepth`,
+`ZeroMotionInput`, `ZeroDepthInput`, `DisableGazeRoiMotionInjection`,
+`DebugGlobalDownsampleOutput` and `LegacyHDRTransfer` default false.
+`DebugInputView` defaults false and `DebugInputViewComposite` defaults true.
+The legacy `DebugModelOutput` preview migrates to `PresentPreview=2` when no
+preview is selected. These switches are not required for ordinary setup.
+External-module style/intensity controls are passed through when explicitly
+configured; availability depends on that module. `UICorrection` stays false.
+
+The cross-frame NR experiment is suspended: `PipelineSplit`, `PipelineAsync`
+and `PipelineDebug` are forced off on load, including in old INI files. This
+does not change FSR FG's separate `AllowAsync` option.
+
 ### Resource Barriers (Dx12 Only)
 Some games (especially Unreal Engine) send input resources to DLSS in wrong states, which leads to graphical problems (especially on AMD hardware). Normally OptiScaler tries to detect the engine type and mitigate these problems, but sometimes games do not report this information correctly. To fix problems, these ini parameters would help.
 
@@ -422,5 +510,3 @@ Scale=auto
 These can be changed from the in-game menu with real-time results.
 
 ![menu scale](images/ui_scale.png)
-
-

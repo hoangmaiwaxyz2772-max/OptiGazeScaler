@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <upscalers/dlssnr/DLSSNRPipelineTrace.h>
 
 #include <NVNGX_Parameter.h>
 #include "Nvngx_FG.h"
@@ -464,7 +465,10 @@ NVSDK_NGX_Result Nvngx_FG::D3D12_EvaluateFeature(ID3D12GraphicsCommandList* InCm
             InParameters->Set("DLSSG.HUDLess", (void*) nullptr);
 
         NVSDK_NGX_Handle TempHandle = { .Id = InFeatureHandle->Id - DLSSG_MOD_ID_OFFSET };
-        return _DLSSG_D3D12_EvaluateFeature(InCmdList, &TempHandle, InParameters, InCallback);
+        DLSSNRPipelineTrace::Mark("nvngx-fg-record-enter", InCmdList);
+        const auto result = _DLSSG_D3D12_EvaluateFeature(InCmdList, &TempHandle, InParameters, InCallback);
+        DLSSNRPipelineTrace::Mark("nvngx-fg-record-return", InCmdList, nullptr, static_cast<UINT>(result));
+        return result;
     }
 
     return NVSDK_NGX_Result_Fail;

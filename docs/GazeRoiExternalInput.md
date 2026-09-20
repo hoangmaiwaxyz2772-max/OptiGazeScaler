@@ -1,8 +1,8 @@
 # Gaze ROI External Input
 
-This document describes the first external gaze input path for the experimental DLSS Gaze ROI MVP.
+This document describes the shared external gaze input used by the DLSS, DLSS5 / NR and FSR frame-generation ROI controls.
 
-Last checked: 2026-07-25. The shared-memory bridge build and WebSocket-to-slot smoke test pass; the stale-input history-preservation repair is compiled and deployed pending real-game validation.
+The bridge programs in `tools/gaze_roi_shared_bridge` and `tools/gaze_roi_bridge` are user-facing input adapters, not development test tools.
 
 ## Data Path
 
@@ -20,8 +20,8 @@ The browser still sends WebSocket messages, but the bridge writes only the lates
 
 Open the OptiScaler overlay:
 
-- Enable **Gaze ROI DLSS**.
-- Set **Control** to `ExternalSharedMemory`.
+- Open **Gaze ROI Control** and set **Control** to `ExternalSharedMemory`.
+- Enable the desired ROI under **Gaze ROI DLSS**, **DLSS5 / NR**, or the FSR FG ROI settings.
 - Leave **Stale** at `50 ms` for the first tests.
 
 Equivalent INI:

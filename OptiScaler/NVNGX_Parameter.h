@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 
 // Use real NVNGX params encapsulated in custom one
 // Which is not working correctly
@@ -54,8 +55,14 @@ void InitNGXParameters(NVSDK_NGX_Parameter* InParams);
 /// @brief Internal variant structure holding the value of a single NGX parameter.
 struct Parameter
 {
+    enum class PointerKind { None, Untyped, D3D11, D3D12 };
+    PointerKind pointerKind = PointerKind::None;
     template <typename T> void operator=(T value)
     {
+        if constexpr (std::is_same_v<T, ID3D12Resource*>) pointerKind = PointerKind::D3D12;
+        else if constexpr (std::is_same_v<T, ID3D11Resource*>) pointerKind = PointerKind::D3D11;
+        else if constexpr (std::is_same_v<T, void*>) pointerKind = PointerKind::Untyped;
+        else pointerKind = PointerKind::None;
         if constexpr (std::is_same<T, void*>::value || std::is_same<T, ID3D11Resource*>::value ||
                       std::is_same<T, ID3D12Resource*>::value)
         {
@@ -226,6 +233,11 @@ struct NVNGX_Parameters : public NVSDK_NGX_Parameter
     void Reset() override;
 
     std::vector<std::string> enumerate() const;
+
+    // No RTTI is required. Native tables registered at allocation retain typed
+    // Set/Reset metadata; unregistered tables and unknown pointers stay opaque.
+    static bool D3D12Resources(const NVSDK_NGX_Parameter* parameters, std::vector<ID3D12Resource*>& resources);
+    inline static std::atomic<void*> implementation {nullptr};
 
   private:
     ankerl::unordered_dense::map<std::string, Parameter> m_values;

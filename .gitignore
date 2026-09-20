@@ -440,3 +440,16 @@ CyberFSR/imgui.ini
 /OptiScaler/resource_build_commit.h
 /OptiScaler/misc/Telemetry.cpp
 /OptiScaler/misc/Telemetry.h
+
+# Local research reports and experiments are not release inputs.
+/docs/*
+!/docs/DLSS5.md
+!/docs/GazeROI.md
+!/docs/GazeRoiExternalInput.md
+/tools/*
+!/tools/compile_dlssnr_extrapolation.ps1
+!/tools/gaze_roi_bridge/
+!/tools/gaze_roi_shared_bridge/
+/*-disasm.txt
+/agent.md
+/LOCAL_GAZE_ROI_HANDOFF.md

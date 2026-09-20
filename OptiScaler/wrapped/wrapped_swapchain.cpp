@@ -9,6 +9,10 @@
 #include <hooks/D3D12_Hooks.h>
 
 #include <menu/menu_overlay_dx.h>
+#include <upscalers/dlssnr/DLSSNRPreview.h>
+#include <upscalers/dlssnr/DLSSNRLatePass.h>
+#include <upscalers/dlssnr/DLSSNRPipelineTrace.h>
+#include <upscalers/dlssnr/DLSSNRPipelineAccess.h>
 
 #include <misc/FrameLimit.h>
 #include <upscaler_time/UpscalerTime_Dx11.h>
@@ -164,6 +168,12 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     HRESULT presentResult;
 
     auto willPresent = (Flags & DXGI_PRESENT_TEST) == 0;
+    if (willPresent)
+    {
+        DLSSNRPipelineTrace::Poll();
+        DLSSNRPipelineTrace::Mark("present-enter", pSwapChain);
+    }
+    if (willPresent) DLSSNRLatePass::EndFrame();
 
     if (willPresent)
     {
@@ -208,6 +218,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
     else if (pDevice->QueryInterface(IID_PPV_ARGS(&cq)) == S_OK)
     {
+        if (willPresent) DLSSNRPipelineTrace::ObserveQueue(cq);
         cq->Release();
 
         if (!_dx12Device)
@@ -216,6 +227,12 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         ID3D12CommandQueue* realQueue = nullptr;
         if (Util::CheckForRealObject(__FUNCTION__, cq, (IUnknown**) &realQueue))
             cq = realQueue;
+
+        if (willPresent)
+        {
+            DLSSNRPipelineTrace::ObserveQueue(cq);
+            DLSSNRPipelineTrace::Mark("present-queue", pSwapChain, cq);
+        }
 
         State::Instance().swapchainApi = DX12;
 
@@ -295,10 +312,13 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     // DXVK check, it's here because of upscaler time calculations
     if (IdentifyGpu::getPrimaryGpu().usesDxvk)
     {
+        const auto trace = willPresent ? DLSSNRPipelineTrace::Enter("native-present-enter", pSwapChain, cq, Flags) : 0;
         if (pPresentParameters == nullptr)
             presentResult = pSwapChain->Present(SyncInterval, Flags);
         else
             presentResult = ((IDXGISwapChain1*) pSwapChain)->Present1(SyncInterval, Flags, pPresentParameters);
+
+        DLSSNRPipelineTrace::Leave("native-present-return", trace, pSwapChain, cq, Flags, presentResult);
 
         if (presentResult == S_OK)
         {
@@ -322,6 +342,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             LOG_ERROR("3 {:X}", (UINT) presentResult);
         }
 
+        if (willPresent) DLSSNRPipelineTrace::EndPresent(presentResult);
         return presentResult;
     }
 
@@ -331,8 +352,22 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         if (auto currentFeature = State::Instance().currentFeature; currentFeature != nullptr)
             currentFeature->TickFrozenCheck();
 
+        // Final model preview bypasses all game post-processing. Draw before
+        // the Present overlay so its controls remain accessible.
+        const auto previewTrace = DLSSNRPipelineTrace::Enter("preview-enter", pSwapChain, cq);
+        if (cq != nullptr && DLSSNRPreview::Present(pSwapChain, cq))
+        {
+            // We replaced the complete buffer, so Present1 dirty/scroll rects
+            // describing only the game's original updates are no longer valid.
+            static const DXGI_PRESENT_PARAMETERS fullPreview {};
+            if (pPresentParameters != nullptr) pPresentParameters = &fullPreview;
+        }
+        DLSSNRPipelineTrace::Leave("preview-return", previewTrace, pSwapChain, cq);
+
         // Draw overlay
+        const auto overlayTrace = DLSSNRPipelineTrace::Enter("overlay-enter", pSwapChain, cq);
         MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);
+        DLSSNRPipelineTrace::Leave("overlay-return", overlayTrace, pSwapChain, cq);
 
 #ifdef LOW_LATENCY_INPUTS
         if (State::Instance().activeFgOutput == FGOutput::FSRFG)
@@ -367,10 +402,13 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     LOG_DEBUG("Calling original present");
 
     // swapchain present
+    const auto nativeTrace = willPresent ? DLSSNRPipelineTrace::Enter("native-present-enter", pSwapChain, cq, Flags) : 0;
     if (pPresentParameters == nullptr)
         presentResult = pSwapChain->Present(SyncInterval, Flags);
     else
         presentResult = ((IDXGISwapChain1*) pSwapChain)->Present1(SyncInterval, Flags, pPresentParameters);
+
+    DLSSNRPipelineTrace::Leave("native-present-return", nativeTrace, pSwapChain, cq, Flags, presentResult);
 
     if (presentResult == S_OK)
     {
@@ -384,6 +422,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             Util::GetDeviceRemovedReason(State::Instance().currentD3D12Device);
     }
 
+    if (willPresent) DLSSNRPipelineTrace::EndPresent(presentResult);
     return presentResult;
 }
 
@@ -418,7 +457,7 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
     LOG_INFO("{} created, real: {:X}, refCount: {}", _id, (UINT64) real, refCount);
 }
 
-WrappedIDXGISwapChain4::~WrappedIDXGISwapChain4() {}
+WrappedIDXGISwapChain4::~WrappedIDXGISwapChain4() { DLSSNRPreview::BeforeResize(_real); }
 
 //
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::QueryInterface(REFIID riid, void** ppvObject)
@@ -638,6 +677,12 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetBuffer(UINT Buffer, REFIID riid, void** ppSurface)
 {
     auto result = _real->GetBuffer(Buffer, riid, ppSurface);
+    if (SUCCEEDED(result) && ppSurface && *ppSurface && DLSSNRPipelineAccess::Enabled())
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        if (SUCCEEDED(static_cast<IUnknown*>(*ppSurface)->QueryInterface(IID_PPV_ARGS(&resource))))
+            DLSSNRPipelineAccess::ObserveBackBuffer(resource.Get());
+    }
     return result;
 }
 
@@ -707,6 +752,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount, UINT Width, UINT Height,
                                                                 DXGI_FORMAT NewFormat, UINT SwapChainFlags)
 {
+    DLSSNRPreview::BeforeResize(_real);
     LOG_DEBUG("");
 
 #ifdef USE_LOCAL_MUTEX
@@ -881,6 +927,11 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
                 if (DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT & css)
                 {
                     result = _real3->SetColorSpace1(hdrCS);
+                    if (SUCCEEDED(result))
+                    {
+                        DLSSNRPreview::SetColorSpace(_real, hdrCS);
+                        DLSSNRLatePass::SetColorSpace(hdrCS);
+                    }
 
                     if (result != S_OK)
                     {
@@ -909,7 +960,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
     {
         IUnknown* buffer;
 
-        if (_real->GetBuffer(i, IID_PPV_ARGS(&buffer)) == S_OK)
+        if (GetBuffer(i, IID_PPV_ARGS(&buffer)) == S_OK)
         {
             State::Instance().scBuffers.push_back(buffer);
             buffer->Release();
@@ -1080,7 +1131,13 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetColorSpace1(DXGI_COLOR_SPAC
                                     ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020 ||
                                     ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
 
-    return _real3->SetColorSpace1(ColorSpace);
+    const HRESULT result = _real3->SetColorSpace1(ColorSpace);
+    if (SUCCEEDED(result))
+    {
+        DLSSNRPreview::SetColorSpace(_real, ColorSpace);
+        DLSSNRLatePass::SetColorSpace(ColorSpace);
+    }
+    return result;
 }
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCount, UINT Width, UINT Height,
@@ -1088,6 +1145,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
                                                                  const UINT* pCreationNodeMask,
                                                                  IUnknown* const* ppPresentQueue)
 {
+    DLSSNRPreview::BeforeResize(_real);
     LOG_DEBUG("");
 
 #ifdef USE_LOCAL_MUTEX
@@ -1283,6 +1341,11 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
                 if (DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT & css)
                 {
                     result = _real3->SetColorSpace1(hdrCS);
+                    if (SUCCEEDED(result))
+                    {
+                        DLSSNRPreview::SetColorSpace(_real, hdrCS);
+                        DLSSNRLatePass::SetColorSpace(hdrCS);
+                    }
 
                     if (result != S_OK)
                     {
@@ -1311,7 +1374,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
     {
         IUnknown* buffer;
 
-        if (_real->GetBuffer(i, IID_PPV_ARGS(&buffer)) == S_OK)
+        if (GetBuffer(i, IID_PPV_ARGS(&buffer)) == S_OK)
         {
             State::Instance().scBuffers.push_back(buffer);
             buffer->Release();

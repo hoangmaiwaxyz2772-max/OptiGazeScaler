@@ -286,7 +286,8 @@ void DLSSDFeatureDx12::UpdateGazePoint()
         _gazeHasPreviousRect = false;
 }
 
-bool DLSSDFeatureDx12::BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& inputRect)
+bool DLSSDFeatureDx12::BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& inputRect,
+                                      int configuredWidthPx, int configuredHeightPx)
 {
     const uint32_t renderWidth = RenderWidth();
     const uint32_t renderHeight = RenderHeight();
@@ -295,8 +296,8 @@ bool DLSSDFeatureDx12::BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& i
     if (renderWidth == 0 || renderHeight == 0 || targetWidth == 0 || targetHeight == 0)
         return false;
 
-    outputRect.width = std::clamp<uint32_t>(Config::Instance()->GazeRoiWidthPx.value_or_default(), 64, targetWidth);
-    outputRect.height = std::clamp<uint32_t>(Config::Instance()->GazeRoiHeightPx.value_or_default(), 64, targetHeight);
+    outputRect.width = std::clamp<uint32_t>(std::max(configuredWidthPx, 0), std::min(64U, targetWidth), targetWidth);
+    outputRect.height = std::clamp<uint32_t>(std::max(configuredHeightPx, 0), std::min(64U, targetHeight), targetHeight);
     const auto alignedInputSize = [](uint32_t outputSize, uint32_t renderExtent, uint32_t targetExtent)
     {
         const uint32_t scaled = std::max(64U, static_cast<uint32_t>(
@@ -324,6 +325,26 @@ bool DLSSDFeatureDx12::BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& i
     };
     outputRect.x = mapOrigin(inputRect.x, inputRect.width, renderWidth, outputRect.width, targetWidth);
     outputRect.y = mapOrigin(inputRect.y, inputRect.height, renderHeight, outputRect.height, targetHeight);
+    return true;
+}
+
+bool DLSSDFeatureDx12::BuildDlssNrGazeRegion(DLSSNRFeatureDx12::FoveatedRegion& region)
+{
+    UpdateGazePoint();
+    GazeRoiRect outputRect {};
+    GazeRoiRect inputRect {};
+    if (!BuildGazeRoiRects(outputRect, inputRect,
+                           Config::Instance()->DLSSNRGazeRoiWidthPx.value_or_default(),
+                           Config::Instance()->DLSSNRGazeRoiHeightPx.value_or_default()))
+        return false;
+    region.outputX = outputRect.x;
+    region.outputY = outputRect.y;
+    region.outputWidth = outputRect.width;
+    region.outputHeight = outputRect.height;
+    region.inputX = inputRect.x;
+    region.inputY = inputRect.y;
+    region.inputWidth = inputRect.width;
+    region.inputHeight = inputRect.height;
     return true;
 }
 
@@ -507,7 +528,9 @@ bool DLSSDFeatureDx12::TryEvaluateGazeRoi(ID3D12GraphicsCommandList* commandList
             return false;
         }
     }
-    else if (!BuildGazeRoiRects(outputRect, inputRect))
+    else if (!BuildGazeRoiRects(outputRect, inputRect,
+                                Config::Instance()->GazeRoiWidthPx.value_or_default(),
+                                Config::Instance()->GazeRoiHeightPx.value_or_default()))
     {
         return false;
     }
@@ -1083,6 +1106,19 @@ bool DLSSDFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList
             LOG_ERROR("_EvaluateFeature result: {0:X}", (unsigned int) nvResult);
             return false;
         }
+
+        // Full-frame NR runs after Ray Reconstruction and before downstream
+        // frame-generation capture, matching the ordinary DLSS path.
+        if (Config::Instance()->DLSSNREnabled.value_or_default())
+        {
+            if (_dlssNr == nullptr)
+                _dlssNr = std::make_unique<DLSSNRFeatureDx12>();
+            DLSSNRFeatureDx12::FoveatedRegion region {};
+            const bool useGazeRegion = Config::Instance()->DLSSNRGazeRoiEnabled.value_or_default() &&
+                                       BuildDlssNrGazeRegion(region);
+            _dlssNr->Evaluate(Device, InCommandList, InParameters, TargetWidth(), TargetHeight(), DepthInverted(),
+                              useGazeRegion ? &region : nullptr);
+        }
     }
     else
     {
@@ -1111,6 +1147,8 @@ DLSSDFeatureDx12::DLSSDFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter*
 DLSSDFeatureDx12::~DLSSDFeatureDx12()
 {
     GazeRoiInput::Stop();
+    if (_dlssNr != nullptr)
+        _dlssNr->Shutdown(Device);
     if (State::Instance().isShuttingDown)
         return;
 

@@ -53,11 +53,19 @@ class GazeRoiFrameSync
     };
 
     static bool Acquire(ID3D12GraphicsCommandList* commandList, uint32_t& frameSlot);
+    // Same lifetime tracking as Acquire, but never waits for a submitted
+    // frame slot. Callers that cannot safely block can bypass their work when
+    // all slots are still in flight.
+    static bool TryAcquire(ID3D12GraphicsCommandList* commandList, uint32_t& frameSlot);
+    static void Cancel(uint32_t frameSlot, ID3D12GraphicsCommandList* commandList);
     static void OnExecuteCommandLists(ID3D12CommandQueue* commandQueue, UINT numCommandLists,
                                       ID3D12CommandList* const* commandLists);
     static void DeferRelease(IUnknown* object);
     static void DeferCallback(std::function<void()> callback);
     static void FlushDeferred();
+    // Backpressure for bounded async consumers. Wait only for work that has
+    // actually been submitted, then reclaim its slots and deferred references.
+    static bool WaitForSubmittedWork();
     static bool BeginGpuTiming(ID3D12Device* device, ID3D12GraphicsCommandList* commandList, uint32_t frameSlot,
                                uint32_t timingKind = 0);
     static void SetGpuTimingPrime(ID3D12GraphicsCommandList* commandList, uint32_t frameSlot, bool issued);

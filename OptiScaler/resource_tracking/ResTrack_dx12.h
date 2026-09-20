@@ -392,6 +392,7 @@ class ResTrack_Dx12
     static void hkExecuteBundle(ID3D12GraphicsCommandList* This, ID3D12GraphicsCommandList* pCommandList);
 
     static HRESULT hkClose(ID3D12GraphicsCommandList* This);
+    static void CheckLateInputs(ID3D12GraphicsCommandList* commands, UINT captureKind);
 
     static void hkCreateRenderTargetView(ID3D12Device* This, ID3D12Resource* pResource,
                                          D3D12_RENDER_TARGET_VIEW_DESC* pDesc,
@@ -449,6 +450,8 @@ class ResTrack_Dx12
     }
 
   public:
+    static void LogLateCaptureDiagnostics();
+    static bool ObserveCommandList(ID3D12GraphicsCommandList* commands);
     static void HookDevice(ID3D12Device* device);
     static void EnsureQueueHook(ID3D12Device* device);
     static void ReleaseHooks();

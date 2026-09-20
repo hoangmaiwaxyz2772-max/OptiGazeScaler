@@ -5,6 +5,7 @@
 #include <Util.h>
 #include <Logger.h>
 #include <Config.h>
+#include <upscalers/dlssnr/DLSSNRPipelineAccess.h>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
@@ -93,6 +94,11 @@ static void CreateRenderTargetDx12(ID3D12Device* device, IDXGISwapChain* pSwapCh
     {
         ID3D12Resource* pBackBuffer = nullptr;
         auto result = pSwapChain->GetBuffer(i, IID_PPV_ARGS(&pBackBuffer));
+
+        // The overlay can receive the native swapchain, bypassing our wrapper.
+        // Tag its buffers before the RTV records their resource identities.
+        if (SUCCEEDED(result) && pBackBuffer != nullptr)
+            DLSSNRPipelineAccess::ObserveBackBuffer(pBackBuffer);
 
         if (pBackBuffer != nullptr)
             pBackBuffer->Release();

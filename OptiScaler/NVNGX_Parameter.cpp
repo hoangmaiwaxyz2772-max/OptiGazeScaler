@@ -7,6 +7,166 @@
 #include <ankerl/unordered_dense.h>
 #include <misc/IdentifyGpu.h>
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <upscalers/dlssnr/DLSSNRMethodHooks.h>
+#include <upscalers/dlssnr/DLSSNRNativeParameters.h>
+
+namespace
+{
+struct NativeParameterRecord
+{
+    std::unordered_map<std::string, Parameter> pointers;
+    bool complete = true;
+};
+std::mutex nativeParameterMutex;
+std::unordered_map<const NVSDK_NGX_Parameter*, NativeParameterRecord> nativeParameters;
+thread_local unsigned nativeParameterDepth = 0;
+struct NativeParameterCall
+{
+    bool outer = nativeParameterDepth++ == 0;
+    ~NativeParameterCall() { --nativeParameterDepth; }
+};
+
+const char* CanonicalNativePointerKey(const char* key)
+{
+    // Native NGX accepts compact and readable spellings for the same entry.
+    // Keep one shadow slot so an overwrite cannot retain an obsolete pointer.
+    static constexpr std::pair<std::string_view, const char*> aliases[] {
+        {NVSDK_NGX_EParameter_Color, NVSDK_NGX_Parameter_Color},
+        {NVSDK_NGX_EParameter_Output, NVSDK_NGX_Parameter_Output},
+        {NVSDK_NGX_EParameter_Depth, NVSDK_NGX_Parameter_Depth},
+        {NVSDK_NGX_EParameter_MotionVectors, NVSDK_NGX_Parameter_MotionVectors},
+        {NVSDK_NGX_EParameter_Albedo, NVSDK_NGX_Parameter_Albedo},
+        {NVSDK_NGX_EParameter_ResourceAllocCallback, NVSDK_NGX_Parameter_ResourceAllocCallback},
+        {NVSDK_NGX_EParameter_ResourceReleaseCallback, NVSDK_NGX_Parameter_ResourceReleaseCallback},
+        {NVSDK_NGX_EParameter_DLSSOptimalSettingsCallback, NVSDK_NGX_Parameter_DLSSOptimalSettingsCallback}
+    };
+    for (const auto& [compact, readable] : aliases) if (compact == key) return readable;
+    return key;
+}
+
+template<unsigned Slot, class T> struct NativeParameterSet
+{
+    using Fn = void(STDMETHODCALLTYPE*)(NVSDK_NGX_Parameter*, const char*, T);
+    using Hook = DLSSNRMethodHooks::MethodHook<36000 + Slot, Fn>;
+    static void STDMETHODCALLTYPE Call(NVSDK_NGX_Parameter* parameters, const char* key, T value)
+    {
+        NativeParameterCall scope;
+        Hook::Forward(parameters, key, value);
+        if (!scope.outer || !key) return;
+        key = CanonicalNativePointerKey(key);
+        std::lock_guard lock(nativeParameterMutex);
+        const auto found = nativeParameters.find(parameters);
+        if (found == nativeParameters.end()) return;
+        auto& record = found->second;
+        if constexpr (std::is_pointer_v<T>)
+        {
+            if (!value) record.pointers.erase(key);
+            else if (record.pointers.size() < 4096 || record.pointers.contains(key)) record.pointers[key] = value;
+            else record.complete = false;
+        }
+        else record.pointers.erase(key); // Numeric overwrite removes a previous resource.
+    }
+    static bool Install(void** table) { return Hook::Install(table[Slot], Call) == NO_ERROR; }
+};
+using NativeResetHook = DLSSNRMethodHooks::MethodHook<36016, void(STDMETHODCALLTYPE*)(NVSDK_NGX_Parameter*)>;
+void STDMETHODCALLTYPE NativeParameterReset(NVSDK_NGX_Parameter* parameters)
+{
+    NativeParameterCall scope;
+    NativeResetHook::Forward(parameters);
+    if (!scope.outer) return;
+    std::lock_guard lock(nativeParameterMutex);
+    if (auto it = nativeParameters.find(parameters); it != nativeParameters.end()) it->second = {};
+}
+
+bool ParameterResources(const auto& values, std::vector<ID3D12Resource*>& resources, std::string& unknown)
+{
+    bool complete = true;
+    for (const auto& [name, value] : values)
+    {
+        if (value.pointerKind == Parameter::PointerKind::None || !value.values.vp) continue;
+        // The NGX C API also accepts resource keys through SetVoidPointer.
+        // Classify by its public key contract; never QueryInterface an arbitrary
+        // callback/CPU-data pointer to guess whether it is a resource.
+        static constexpr std::string_view resourceKeys[] {
+            NVSDK_NGX_Parameter_Color, NVSDK_NGX_Parameter_Output, NVSDK_NGX_Parameter_Depth,
+            NVSDK_NGX_Parameter_MotionVectors, NVSDK_NGX_Parameter_ExposureTexture,
+            NVSDK_NGX_Parameter_TransparencyMask, NVSDK_NGX_Parameter_Albedo,
+            NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask,
+            NVSDK_NGX_Parameter_MotionVectors3D, NVSDK_NGX_Parameter_DepthHighRes,
+            NVSDK_NGX_Parameter_MotionVectorsReflection, NVSDK_NGX_Parameter_IsParticleMask,
+            NVSDK_NGX_Parameter_AnimatedTextureMask, NVSDK_NGX_Parameter_RayTracingHitDistance,
+            NVSDK_NGX_EParameter_Color, NVSDK_NGX_EParameter_Output, NVSDK_NGX_EParameter_Depth,
+            NVSDK_NGX_EParameter_MotionVectors, NVSDK_NGX_EParameter_Albedo,
+            NVSDK_NGX_Parameter_GBuffer_Normals, NVSDK_NGX_Parameter_GBuffer_Albedo,
+            NVSDK_NGX_Parameter_GBuffer_Roughness, NVSDK_NGX_Parameter_GBuffer_DiffuseAlbedo,
+            NVSDK_NGX_Parameter_GBuffer_SpecularAlbedo, NVSDK_NGX_Parameter_GBuffer_IndirectAlbedo,
+            NVSDK_NGX_Parameter_GBuffer_SpecularMvec, NVSDK_NGX_Parameter_GBuffer_DisocclusionMask
+        };
+        if (value.pointerKind == Parameter::PointerKind::D3D12 ||
+            (value.pointerKind == Parameter::PointerKind::Untyped &&
+             std::find(std::begin(resourceKeys), std::end(resourceKeys), name) != std::end(resourceKeys)))
+            resources.push_back(static_cast<ID3D12Resource*>(value.values.vp));
+        else if (value.pointerKind == Parameter::PointerKind::Untyped &&
+                 (name == NVSDK_NGX_Parameter_DLSSOptimalSettingsCallback ||
+                  name == NVSDK_NGX_EParameter_DLSSOptimalSettingsCallback ||
+                  name == NVSDK_NGX_Parameter_DLSSGetStatsCallback || name == "DLSSDOptimalSettingsCallback" ||
+                  name == NVSDK_NGX_Parameter_ResourceAllocCallback ||
+                  name == NVSDK_NGX_EParameter_ResourceAllocCallback ||
+                  name == NVSDK_NGX_Parameter_ResourceReleaseCallback ||
+                  name == NVSDK_NGX_EParameter_ResourceReleaseCallback ||
+                  name == NVSDK_NGX_Parameter_DLSS_INV_VIEW_PROJECTION_MATRIX ||
+                  name == NVSDK_NGX_Parameter_DLSS_CLIP_TO_PREV_CLIP_MATRIX))
+        { /* SDK callbacks and CPU matrices do not identify GPU resources.
+             Alloc/release callbacks supply SDK-private allocations, covered by
+             the native-call domain; these function pointers are not resources. */ }
+        else
+        {
+            complete = false;
+            // Keep all key classes in one sampled failure, with an explicit
+            // bound instead of exposing only the next key after each repair.
+            if (unknown.size() < 2048) { if (!unknown.empty()) unknown += ','; unknown += name; }
+            else if (!unknown.ends_with(",truncated")) unknown += ",truncated";
+        }
+    }
+    return complete;
+}
+}
+
+void DLSSNRNativeParameters::Register(NVSDK_NGX_Parameter* parameters, bool fresh)
+{
+    if (!parameters || !Config::Instance()->DLSSNRPipelineAsync.value_or_default()) return;
+    auto** table = *reinterpret_cast<void***>(parameters);
+    // MSVC groups overloads in reverse declaration order in this NGX ABI.
+    // Set(void*) is slot 0, Set(unsigned long long) slot 7; Reset is slot 16.
+    // Install outside the metadata mutex: Detours enlists other game threads.
+    bool ready = NativeParameterSet<0, void*>::Install(table);
+    ready &= NativeParameterSet<1, ID3D12Resource*>::Install(table);
+    ready &= NativeParameterSet<2, ID3D11Resource*>::Install(table);
+    ready &= NativeParameterSet<3, int>::Install(table);
+    ready &= NativeParameterSet<4, unsigned int>::Install(table);
+    ready &= NativeParameterSet<5, double>::Install(table);
+    ready &= NativeParameterSet<6, float>::Install(table);
+    ready &= NativeParameterSet<7, unsigned long long>::Install(table);
+    ready &= NativeResetHook::Install(table[16], NativeParameterReset) == NO_ERROR;
+    {
+        std::lock_guard lock(nativeParameterMutex);
+        if (!ready) nativeParameters.erase(parameters);
+        else if (fresh) nativeParameters[parameters] = {};
+        else
+        {
+            const auto [it, inserted] = nativeParameters.try_emplace(parameters);
+            // Legacy GetParameters can return an SDK-owned table used before
+            // interception. Only Reset establishes an empty observed history.
+            if (inserted) it->second.complete = false;
+        }
+    }
+    LOG_INFO("[DLSSNR_ASYNC] native-parameters=0x{:X} tracking={} fresh={}", (uintptr_t)parameters, ready, fresh);
+}
+void DLSSNRNativeParameters::Forget(NVSDK_NGX_Parameter* parameters)
+{
+    std::lock_guard lock(nativeParameterMutex);
+    nativeParameters.erase(parameters);
+}
 
 /// @brief Calculates the resolution scaling ratio override based on the provided quality level and current
 /// configuration.
@@ -77,11 +237,54 @@ std::optional<float> GetQualityOverrideRatio(const NVSDK_NGX_PerfQuality_Value i
 
 NVNGX_Parameters::NVNGX_Parameters(std::string_view name, bool isPersistent) : Name(name)
 {
+    implementation.store(*reinterpret_cast<void**>(this), std::memory_order_release);
     // Old flag used to indicate custom table. Obsolete?
     Set("OptiScaler", 1);
     // New tracking flag
     Set(NGX_AllocTypes::AllocKey.data(),
         isPersistent ? NGX_AllocTypes::InternPersistent : NGX_AllocTypes::InternDynamic);
+}
+
+bool NVNGX_Parameters::D3D12Resources(const NVSDK_NGX_Parameter* parameters,
+                                     std::vector<ID3D12Resource*>& resources)
+{
+    if (!parameters) return false;
+    bool complete = false;
+    std::string unknown;
+    if (*reinterpret_cast<void* const*>(parameters) == implementation.load(std::memory_order_acquire))
+    {
+        const auto* own = static_cast<const NVNGX_Parameters*>(parameters);
+        std::lock_guard lock(own->m_mutex);
+        complete = ParameterResources(own->m_values, resources, unknown);
+    }
+    else
+    {
+        std::lock_guard lock(nativeParameterMutex);
+        const auto it = nativeParameters.find(parameters);
+        if (it != nativeParameters.end())
+        {
+            complete = ParameterResources(it->second.pointers, resources, unknown) && it->second.complete;
+            if (!it->second.complete) { if (!unknown.empty()) unknown += ','; unknown += "native-history-incomplete"; }
+        }
+        else unknown = "unregistered-native-table";
+    }
+    if (!complete)
+    {
+        static std::atomic<UINT64> failures {0};
+        const auto count = ++failures;
+        if (count <= 3 || count % 300 == 0)
+            LOG_INFO("[DLSSNR_ASYNC] native-parameter-incomplete={} table=0x{:X} key={} resources={}",
+                     count, (uintptr_t)parameters, unknown, resources.size());
+    }
+    else
+    {
+        static std::atomic<UINT64> successes {0};
+        const auto count = ++successes;
+        if (count <= 3 || count % 300 == 0)
+            LOG_INFO("[DLSSNR_ASYNC] native-parameter-snapshot={} table=0x{:X} resources={} complete=true",
+                     count, (uintptr_t)parameters, resources.size());
+    }
+    return complete;
 }
 
 void NVNGX_Parameters::Set(const char* key, unsigned long long value)

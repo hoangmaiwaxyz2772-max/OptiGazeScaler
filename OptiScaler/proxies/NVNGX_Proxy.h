@@ -7,6 +7,8 @@
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
+#include <upscalers/dlssnr/DLSSNRPipelineSplit.h>
+#include <upscalers/dlssnr/DLSSNRNativeParameters.h>
 
 #include "nvapi/NvApiHooks.h"
 
@@ -813,21 +815,65 @@ class NVNGXProxy
         return _module.D3D12_GetFeatureRequirements;
     }
 
+    static NVSDK_NGX_Result RecordD3D12GetCapabilityParameters(NVSDK_NGX_Parameter** output)
+    {
+        const auto result = _module.D3D12_GetCapabilityParameters(output);
+        if (result == NVSDK_NGX_Result_Success && output) DLSSNRNativeParameters::Register(*output, true);
+        return result;
+    }
+    static NVSDK_NGX_Result RecordD3D12AllocateParameters(NVSDK_NGX_Parameter** output)
+    {
+        const auto result = _module.D3D12_AllocateParameters(output);
+        if (result == NVSDK_NGX_Result_Success && output) DLSSNRNativeParameters::Register(*output, true);
+        return result;
+    }
+    static NVSDK_NGX_Result RecordD3D12GetParameters(NVSDK_NGX_Parameter** output)
+    {
+        const auto result = _module.D3D12_GetParameters(output);
+        if (result == NVSDK_NGX_Result_Success && output) DLSSNRNativeParameters::Register(*output, false);
+        return result;
+    }
+    static NVSDK_NGX_Result RecordD3D12DestroyParameters(NVSDK_NGX_Parameter* parameters)
+    {
+        const auto result = _module.D3D12_DestroyParameters(parameters);
+        if (result == NVSDK_NGX_Result_Success) DLSSNRNativeParameters::Forget(parameters);
+        return result;
+    }
     static PFN_D3D12_GetCapabilityParameters D3D12_GetCapabilityParameters()
     {
-        return _module.D3D12_GetCapabilityParameters;
+        return _module.D3D12_GetCapabilityParameters ? RecordD3D12GetCapabilityParameters : nullptr;
     }
 
-    static PFN_D3D12_AllocateParameters D3D12_AllocateParameters() { return _module.D3D12_AllocateParameters; }
+    static PFN_D3D12_AllocateParameters D3D12_AllocateParameters()
+    { return _module.D3D12_AllocateParameters ? RecordD3D12AllocateParameters : nullptr; }
 
-    static PFN_D3D12_GetParameters D3D12_GetParameters() { return _module.D3D12_GetParameters; }
+    static PFN_D3D12_GetParameters D3D12_GetParameters()
+    { return _module.D3D12_GetParameters ? RecordD3D12GetParameters : nullptr; }
 
     static PFN_D3D12_DestroyParameters D3D12_DestroyParameters()
     {
         if (!_dx12Inited)
             return nullptr;
 
-        return _module.D3D12_DestroyParameters;
+        return _module.D3D12_DestroyParameters ? RecordD3D12DestroyParameters : nullptr;
+    }
+
+    static NVSDK_NGX_Result RecordD3D12CreateFeature(ID3D12GraphicsCommandList* commands,
+                                                   NVSDK_NGX_Feature feature,
+                                                   NVSDK_NGX_Parameter* parameters,
+                                                   NVSDK_NGX_Handle** handle)
+    {
+        DLSSNRPipelineSplit::NativeRecording recording(commands, parameters);
+        return _module.D3D12_CreateFeature(recording.Commands(), feature, parameters, handle);
+    }
+
+    static NVSDK_NGX_Result RecordD3D12EvaluateFeature(ID3D12GraphicsCommandList* commands,
+                                                     const NVSDK_NGX_Handle* handle,
+                                                     const NVSDK_NGX_Parameter* parameters,
+                                                     PFN_NVSDK_NGX_ProgressCallback callback)
+    {
+        DLSSNRPipelineSplit::NativeRecording recording(commands, parameters);
+        return _module.D3D12_EvaluateFeature(recording.Commands(), handle, parameters, callback);
     }
 
     static PFN_D3D12_CreateFeature D3D12_CreateFeature()
@@ -835,7 +881,7 @@ class NVNGXProxy
         if (!_dx12Inited)
             return nullptr;
 
-        return _module.D3D12_CreateFeature;
+        return _module.D3D12_CreateFeature ? RecordD3D12CreateFeature : nullptr;
     }
 
     static PFN_D3D12_EvaluateFeature D3D12_EvaluateFeature()
@@ -843,7 +889,7 @@ class NVNGXProxy
         if (!_dx12Inited)
             return nullptr;
 
-        return _module.D3D12_EvaluateFeature;
+        return _module.D3D12_EvaluateFeature ? RecordD3D12EvaluateFeature : nullptr;
     }
 
     static PFN_D3D12_ReleaseFeature D3D12_ReleaseFeature()

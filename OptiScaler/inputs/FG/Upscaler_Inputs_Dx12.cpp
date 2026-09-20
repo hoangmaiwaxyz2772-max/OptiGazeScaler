@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <upscalers/dlssnr/DLSSNRLatePass.h>
 #include "Upscaler_Inputs_Dx12.h"
 #include <hudfix/Hudfix_Dx12.h>
 #include <resource_tracking/ResTrack_dx12.h>
@@ -30,6 +31,8 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
                                       IFeature_Dx12* feature)
 {
     Hudfix_Dx12::SetSkipStatus(true);
+    // Resource-list controls also belong to late NR when no FG backend exists.
+    Hudfix_Dx12::UpscaleStart();
 
     // FSR Camera values
     float cameraNear = 0.0f;
@@ -134,8 +137,6 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
     fg->SetJitter(jitterX, jitterY);
     fg->SetReset(reset);
     fg->SetInterpolationRect(feature->DisplayWidth(), feature->DisplayHeight());
-
-    Hudfix_Dx12::UpscaleStart();
 
     // FG Prepare
     UINT frameIndex;
@@ -247,6 +248,12 @@ void UpscalerInputsDx12::UpscaleEnd(ID3D12GraphicsCommandList* InCmdList, NVSDK_
                                     IFeature_Dx12* feature)
 {
     Hudfix_Dx12::SetSkipStatus(false);
+    // This callback runs BEFORE feature->Evaluate. Stage() publishes the late
+    // request inside Evaluate, so Pending() is still false here every frame.
+    // Advance the window by mode; actual resource checks still require Pending().
+    const bool lateEnabled = DLSSNRLatePass::Enabled();
+    if (lateEnabled)
+        Hudfix_Dx12::UpscaleEnd(feature->FrameCount(), State::Instance().lastFGFrameTime);
 
     auto fg = State::Instance().currentFG;
 
@@ -260,7 +267,8 @@ void UpscalerInputsDx12::UpscaleEnd(ID3D12GraphicsCommandList* InCmdList, NVSDK_
         if (Config::Instance()->FGHUDFix.value_or_default())
         {
             // For signal after mv & depth copies
-            Hudfix_Dx12::UpscaleEnd(feature->FrameCount(), State::Instance().lastFGFrameTime);
+            if (!lateEnabled)
+                Hudfix_Dx12::UpscaleEnd(feature->FrameCount(), State::Instance().lastFGFrameTime);
 
             ID3D12Resource* output = nullptr;
             if (InParameters->Get(NVSDK_NGX_Parameter_Output, &output) != NVSDK_NGX_Result_Success)

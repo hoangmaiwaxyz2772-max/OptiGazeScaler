@@ -3,6 +3,7 @@
 #include <upscalers/IFeature_Dx12.h>
 #include <shaders/rcas/RCAS_Dx12.h>
 #include <shaders/gaze_roi/GazeRoi_Dx12.h>
+#include <upscalers/dlssnr/DLSSNRFeature_Dx12.h>
 #include <array>
 #include <memory>
 #include <string>
@@ -10,6 +11,7 @@
 class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
 {
   private:
+    std::unique_ptr<DLSSNRFeatureDx12> _dlssNr = nullptr;
     std::unique_ptr<GazeRoi_Dx12> GazeRoi = nullptr;
     std::unique_ptr<GazeRoiMvPatch_Dx12> GazeRoiMvPatch = nullptr;
     std::unique_ptr<GazeRoiColorCrop_Dx12> GazeRoiColorCrop = nullptr;
@@ -54,7 +56,8 @@ class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
     void LogGazeRoiContract(NVSDK_NGX_Parameter* InParameters, const std::string& mode);
     void LogGazeRoiDecision(const std::string& decision);
     void UpdateVirtualGazePoint();
-    bool BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& inputRect);
+    bool BuildGazeRoiRects(GazeRoiRect& outputRect, GazeRoiRect& inputRect,
+                          int configuredWidthPx, int configuredHeightPx);
     bool ResolveGazeRoiOptimalInput(NVSDK_NGX_Parameter* InParameters, GazeRoiRect& outputRect,
                                     GazeRoiRect& inputRect);
     void CaptureGazeRoiCreatePresets(NVSDK_NGX_Parameter* InParameters);
@@ -72,6 +75,7 @@ class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
   public:
     bool InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
     bool EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
+    bool BuildDlssNrGazeRegion(DLSSNRFeatureDx12::FoveatedRegion& region);
 
     static void Shutdown(ID3D12Device* InDevice);
 

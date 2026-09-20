@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Header Files">
@@ -93,6 +93,45 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="upscalers\dlss\DLSSFeature_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRFeature_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRDiagnostics.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineTrace.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineSplit.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRNativeParameters.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineAccess.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRSegmentMethods.inl">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineCapture.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRPreview.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRLatePass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRLateColor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRCommandState.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlssnr\DLSSNRMethodHooks.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="upscalers\dlss\DLSSFeature_Dx11.h">
@@ -1008,6 +1047,24 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="upscalers\dlss\DLSSFeature_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="upscalers\dlssnr\DLSSNRFeature_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="upscalers\dlssnr\DLSSNRPreview.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="upscalers\dlssnr\DLSSNRLatePass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineTrace.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineSplit.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineAccess.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="upscalers\dlss\DLSSFeature_Dx11.cpp">

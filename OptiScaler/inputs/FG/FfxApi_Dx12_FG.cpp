@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <upscalers/dlssnr/DLSSNRPipelineTrace.h>
 
 #include "FfxApi_Dx12_FG.h"
 
@@ -973,6 +974,8 @@ ffxReturnCode_t ffxDispatch_Dx12FG(ffxContext* context, ffxDispatchDescHeader* d
 
     if (desc->type == FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION)
     {
+        const auto* traceDesc = reinterpret_cast<ffxDispatchDescFrameGeneration*>(desc);
+        DLSSNRPipelineTrace::Mark("ffx-fg-input-record", traceDesc->commandList, traceDesc->presentColor.resource, traceDesc->frameID);
         if (!_fgCallbackCalled)
         {
             auto cdDesc = (ffxDispatchDescFrameGeneration*) desc;

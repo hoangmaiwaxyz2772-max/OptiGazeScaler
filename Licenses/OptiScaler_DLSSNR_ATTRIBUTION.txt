@@ -1,0 +1,33 @@
+OptiScaler_DLSSNR exposure / white-point attribution
+==================================================
+
+Project: OptiScaler_DLSSNR by Dagherbou and contributors
+Source: https://github.com/Dagherbou/OptiScaler_DLSSNR
+Reference branch: dlss-neural-rendering
+Reference checkout: 393e0706b950a0ff1498e9dcf66989a80de72f31
+Earlier white-point work: commit 64b02a6f
+License: GNU General Public License, version 3 (see the accompanying LICENSE)
+
+Thank you to Dagherbou, the OptiScaler_DLSSNR contributors and the original
+OptiScaler contributors for their NR integration and exposure/white-point work.
+That work was used as a reference for this fork's adaptation.
+
+Reference files:
+  OptiScaler/dlssnr/DlssNrFeature_Dx12.cpp
+  OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl
+
+Adaptation in OptiGazeScaler:
+  OptiScaler/upscalers/dlssnr/DLSSNRFeature_Dx12.cpp
+  NGX exposure acquisition and the EffectivePaperWhite shader helper
+
+This is a modified implementation. It reads the live NGX exposure texture on
+the GPU and uses PreExposure * ExposureScale / ExposureTexture, with invalid
+input checks and a manual-white fallback. It does not use the reference
+branch's image-brightness meter. The pinned checkout records the consulted
+source, not an exact verbatim import revision. The current HUDfix display-image
+route and ROI edge-extrapolation algorithm are separate from this adaptation.
+
+This notice was added on 2026-09-20. The project remains under GPL version 3;
+retain the license and applicable notices when distributing modified source
+or binaries and provide the corresponding source as required by that license.
+See CREDITS.md for source links, related credits and adaptation details.

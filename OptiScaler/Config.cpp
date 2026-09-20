@@ -498,6 +498,89 @@ bool Config::Reload(std::filesystem::path iniPath)
                 DLSSDRenderPresetUltraPerformance.set_from_config(setting);
         }
 
+        // DLSS-NR (experimental full-frame post-DLSS filter)
+        {
+            DLSSNREnabled.set_from_config(readBool("DLSSNR", "Enabled"));
+            DLSSNRLateHudless.set_from_config(readBool("DLSSNR", "LateHudless"));
+            // The pipeline experiment is suspended. Old testing configurations
+            // must not silently keep splitting, tracing or migrating game work
+            // after their controls have been removed from the menu.
+            DLSSNRPipelineDebug = false;
+            DLSSNRPipelineSplit = false;
+            DLSSNRPipelineAsync = false;
+            DLSSNRLibraryPath.set_from_config(readWString("DLSSNR", "LibraryPath"));
+            DLSSNRStyle.set_from_config(readInt("DLSSNR", "Style"));
+            DLSSNRPreset.set_from_config(readInt("DLSSNR", "Preset"));
+            DLSSNRIntensity.set_from_config(readFloat("DLSSNR", "Intensity"));
+            DLSSNRLocalToneStrength.set_from_config(readFloat("DLSSNR", "LocalToneStrength"));
+            DLSSNRLocalStructureStrength.set_from_config(readFloat("DLSSNR", "LocalStructureStrength"));
+            DLSSNRSkinStructureStrength.set_from_config(readFloat("DLSSNR", "SkinStructureStrength"));
+            DLSSNRUseAutoMask.set_from_config(readBool("DLSSNR", "UseAutoMask"));
+            DLSSNRUICorrection.set_from_config(readBool("DLSSNR", "UICorrection"));
+            DLSSNRFullResolutionGuidance.set_from_config(readBool("DLSSNR", "FullResolutionGuidance"));
+            DLSSNRDebugInputView.set_from_config(readBool("DLSSNR", "DebugInputView"));
+            DLSSNRDebugInputViewComposite.set_from_config(readBool("DLSSNR", "DebugInputViewComposite"));
+            DLSSNRDebugModelOutput.set_from_config(readBool("DLSSNR", "DebugModelOutput"));
+            DLSSNRPresentPreview.set_from_config(readUInt("DLSSNR", "PresentPreview"));
+            // Consolidate legacy in-scene bilinear output into the direct SDR
+            // preview. An explicit current preview takes precedence.
+            auto preview = DLSSNRPresentPreview.value_or_default();
+            if (preview > 3)
+                preview = 0;
+            if (preview == 0 && DLSSNRDebugModelOutput.value_or_default())
+                preview = 2;
+            if (preview == 3 && !DLSSNRLateHudless.value_or_default())
+                preview = 0;
+            DLSSNRPresentPreview = preview;
+            DLSSNRDebugModelOutput = false;
+            DLSSNRPreviewWhiteNits.set_from_config(readFloat("DLSSNR", "PreviewWhiteNits"));
+            DLSSNRDebugGlobalDownsampleOutput.set_from_config(
+                readBool("DLSSNR", "DebugGlobalDownsampleOutput"));
+            DLSSNRLegacyHDRTransfer.set_from_config(readBool("DLSSNR", "LegacyHDRTransfer"));
+            DLSSNRHDRPaperWhite.set_from_config(readFloat("DLSSNR", "HDRPaperWhite"));
+            if (auto setting = readInt("DLSSNR", "WhitePointSource"); setting.has_value())
+                DLSSNRWhitePointSource.set_from_config(std::clamp(setting.value(), 0, 1));
+            if (auto setting = readFloat("DLSSNR", "ExposureScale"); setting.has_value())
+                DLSSNRExposureScale.set_from_config(std::clamp(setting.value(), 0.01f, 16.0f));
+            DLSSNRLowResolutionScale.set_from_config(readInt("DLSSNR", "LowResolutionScale"));
+            DLSSNRLowResolutionFullOutput.set_from_config(readBool("DLSSNR", "LowResolutionFullOutput"));
+            DLSSNROutputTemporalStabilization.set_from_config(readBool("DLSSNR", "OutputTemporalStabilization"));
+            DLSSNRTemporalResidualReconstruction.set_from_config(
+                readBool("DLSSNR", "TemporalResidualReconstruction"));
+            DLSSNRHighResolutionGuidedResidual.set_from_config(
+                readBool("DLSSNR", "HighResolutionGuidedResidual"));
+            DLSSNRLegacyResidualReconstruction.set_from_config(
+                readBool("DLSSNR", "LegacyResidualReconstruction"));
+            DLSSNRFastReconstruction.set_from_config(readBool("DLSSNR", "FastReconstruction"));
+            DLSSNRLowResolutionOriginalMVec.set_from_config(
+                readBool("DLSSNR", "LowResolutionOriginalMVec"));
+            DLSSNRLowResolutionMVecScale.set_from_config(readBool("DLSSNR", "LowResolutionMVecScale"));
+            DLSSNRCloneTypelessDepth.set_from_config(readBool("DLSSNR", "CloneTypelessDepth"));
+            DLSSNRZeroMotionInput.set_from_config(readBool("DLSSNR", "ZeroMotionInput"));
+            DLSSNRZeroDepthInput.set_from_config(readBool("DLSSNR", "ZeroDepthInput"));
+            DLSSNRDisableGazeRoiMotionInjection.set_from_config(
+                readBool("DLSSNR", "DisableGazeRoiMotionInjection"));
+            DLSSNRGazeRoiEnabled.set_from_config(readBool("DLSSNR", "GazeRoiEnabled"));
+            // Migrate old INIs once, without making the independent dimensions
+            // follow later DLSS ROI edits. An explicit "auto" uses NR defaults.
+            if (auto setting = readInt("DLSSNR", "GazeRoiWidthPx"); setting.has_value())
+                DLSSNRGazeRoiWidthPx.set_from_config(std::clamp(setting.value(), 64, 8192));
+            else if (ini.GetValue("DLSSNR", "GazeRoiWidthPx") == nullptr)
+                DLSSNRGazeRoiWidthPx.set_from_config(GazeRoiWidthPx.value_or_default());
+            if (auto setting = readInt("DLSSNR", "GazeRoiHeightPx"); setting.has_value())
+                DLSSNRGazeRoiHeightPx.set_from_config(std::clamp(setting.value(), 64, 8192));
+            else if (ini.GetValue("DLSSNR", "GazeRoiHeightPx") == nullptr)
+                DLSSNRGazeRoiHeightPx.set_from_config(GazeRoiHeightPx.value_or_default());
+            if (auto setting = readInt("DLSSNR", "GazeRoiScale"); setting.has_value())
+                DLSSNRGazeRoiScale.set_from_config(std::clamp(setting.value(), 1, 3));
+            if (auto setting = readInt("DLSSNR", "GazeRoiEdgeBlendPx"); setting.has_value())
+                DLSSNRGazeRoiEdgeBlendPx.set_from_config(std::clamp(setting.value(), 0, 512));
+            DLSSNRGazeRoiExtrapolation.set_from_config(readBool("DLSSNR", "GazeRoiExtrapolation"));
+            // The retired 64px WidthPx key does not constrain the new long-range default.
+            if (auto setting = readInt("DLSSNR", "GazeRoiExtrapolationDistancePx"); setting.has_value())
+                DLSSNRGazeRoiExtrapolationDistancePx.set_from_config(std::clamp(setting.value(), 0, 512));
+        }
+
         // Nvngx_FG
         {
             MakeDepthCopy.set_from_config(readBool("Nvngx_FG", "MakeDepthCopy"));
@@ -1357,6 +1440,101 @@ bool Config::SaveIni()
                      GetIntValue(Instance()->DLSSDRenderPresetPerformance.value_for_config()).c_str());
         ini.SetValue("DLSSD", "RenderPresetUltraPerformance",
                      GetIntValue(Instance()->DLSSDRenderPresetUltraPerformance.value_for_config()).c_str());
+    }
+
+    // DLSS-NR
+    {
+        ini.SetValue("DLSSNR", "Enabled", GetBoolValue(Instance()->DLSSNREnabled.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "LateHudless", GetBoolValue(Instance()->DLSSNRLateHudless.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "PipelineDebug", GetBoolValue(Instance()->DLSSNRPipelineDebug.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "PipelineSplit", GetBoolValue(Instance()->DLSSNRPipelineSplit.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "PipelineAsync", GetBoolValue(Instance()->DLSSNRPipelineAsync.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "LibraryPath",
+                     wstring_to_string(Instance()->DLSSNRLibraryPath.value_for_config_or(L"auto")).c_str());
+        ini.SetValue("DLSSNR", "Style", GetIntValue(Instance()->DLSSNRStyle.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "Preset", GetIntValue(Instance()->DLSSNRPreset.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "Intensity", GetFloatValue(Instance()->DLSSNRIntensity.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "LocalToneStrength",
+                     GetFloatValue(Instance()->DLSSNRLocalToneStrength.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "LocalStructureStrength",
+                     GetFloatValue(Instance()->DLSSNRLocalStructureStrength.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "SkinStructureStrength",
+                     GetFloatValue(Instance()->DLSSNRSkinStructureStrength.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "UseAutoMask",
+                     GetBoolValue(Instance()->DLSSNRUseAutoMask.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "UICorrection",
+                     GetBoolValue(Instance()->DLSSNRUICorrection.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "FullResolutionGuidance",
+                     GetBoolValue(Instance()->DLSSNRFullResolutionGuidance.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "DebugInputView",
+                     GetBoolValue(Instance()->DLSSNRDebugInputView.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "DebugInputViewComposite",
+                     GetBoolValue(Instance()->DLSSNRDebugInputViewComposite.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "DebugModelOutput",
+                     GetBoolValue(Instance()->DLSSNRDebugModelOutput.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "PresentPreview",
+                     GetIntValue(Instance()->DLSSNRPresentPreview.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "PreviewWhiteNits",
+                     GetFloatValue(Instance()->DLSSNRPreviewWhiteNits.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "LegacyHDRTransfer",
+                     GetBoolValue(Instance()->DLSSNRLegacyHDRTransfer.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "HDRPaperWhite",
+                     GetFloatValue(Instance()->DLSSNRHDRPaperWhite.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "WhitePointSource",
+                     GetIntValue(Instance()->DLSSNRWhitePointSource.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "ExposureScale",
+                     GetFloatValue(Instance()->DLSSNRExposureScale.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "LowResolutionScale",
+                     GetIntValue(Instance()->DLSSNRLowResolutionScale.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "LowResolutionFullOutput",
+                     GetBoolValue(Instance()->DLSSNRLowResolutionFullOutput.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "TemporalResidualReconstruction",
+                     GetBoolValue(Instance()->DLSSNRTemporalResidualReconstruction.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "OutputTemporalStabilization",
+                     GetBoolValue(Instance()->DLSSNROutputTemporalStabilization.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "HighResolutionGuidedResidual",
+                     GetBoolValue(Instance()->DLSSNRHighResolutionGuidedResidual.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "LegacyResidualReconstruction",
+                     GetBoolValue(Instance()->DLSSNRLegacyResidualReconstruction.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "FastReconstruction",
+                     GetBoolValue(Instance()->DLSSNRFastReconstruction.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "LowResolutionOriginalMVec",
+                     GetBoolValue(Instance()->DLSSNRLowResolutionOriginalMVec.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "LowResolutionMVecScale",
+                     GetBoolValue(Instance()->DLSSNRLowResolutionMVecScale.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "CloneTypelessDepth",
+                     GetBoolValue(Instance()->DLSSNRCloneTypelessDepth.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "ZeroMotionInput",
+                     GetBoolValue(Instance()->DLSSNRZeroMotionInput.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "ZeroDepthInput",
+                     GetBoolValue(Instance()->DLSSNRZeroDepthInput.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "DisableGazeRoiMotionInjection",
+                     GetBoolValue(Instance()->DLSSNRDisableGazeRoiMotionInjection.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "GazeRoiEnabled",
+                     GetBoolValue(Instance()->DLSSNRGazeRoiEnabled.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "GazeRoiWidthPx",
+                     GetIntValue(Instance()->DLSSNRGazeRoiWidthPx.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "GazeRoiHeightPx",
+                     GetIntValue(Instance()->DLSSNRGazeRoiHeightPx.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "GazeRoiScale",
+                     GetIntValue(Instance()->DLSSNRGazeRoiScale.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "GazeRoiEdgeBlendPx",
+                     GetIntValue(Instance()->DLSSNRGazeRoiEdgeBlendPx.value_for_config()).c_str());
+        ini.SetValue("DLSSNR", "GazeRoiExtrapolation",
+                     GetBoolValue(Instance()->DLSSNRGazeRoiExtrapolation.value_for_config()).c_str());
+        ini.Delete("DLSSNR", "GazeRoiExtrapolationLocal");
+        ini.Delete("DLSSNR", "GazeRoiTone");
+        ini.Delete("DLSSNR", "GazeRoiToneDistancePx");
+        ini.SetValue("DLSSNR", "GazeRoiExtrapolationDistancePx",
+                     GetIntValue(Instance()->DLSSNRGazeRoiExtrapolationDistancePx.value_for_config()).c_str());
+        // Discard retired investigation settings when saving an older INI.
+        for (const auto* key : { "GazeRoiExtrapolationDebugMode", "GazeRoiExtrapolationDebugStaging",
+                                "GazeRoiExtrapolationDebugFloatCache", "GazeRoiExtrapolationDebugDenseSampling",
+                                "GazeRoiExtrapolationDebugLegacyProjection", "GazeRoiExtrapolationDebugFixedLod",
+                                "GazeRoiExtrapolationTemporal", "GazeRoiExtrapolationColorMixing",
+                                "GazeRoiExtrapolationScale", "GazeRoiExtrapolationDepth",
+                                "GazeRoiExtrapolationWidthPx" })
+            ini.Delete("DLSSNR", key);
     }
 
     // NvngxFG

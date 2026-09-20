@@ -20,6 +20,8 @@ class D3D12Hooks
     static void Unhook();
     static void SetRootSignatureTracking(bool enable);
     static bool CanRestoreRootSignature(ID3D12GraphicsCommandList* cmdList);
+    static bool TrackLateCommandState(ID3D12GraphicsCommandList* commands);
+    static void ReleaseLateCommandStateHooks();
     static void HookToCommandListLate(ID3D12GraphicsCommandList* commandList);
     static void RestoreRoot(ID3D12GraphicsCommandList* cmdList);
 };

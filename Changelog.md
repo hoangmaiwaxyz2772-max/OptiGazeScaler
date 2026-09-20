@@ -1,5 +1,16 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## OptiGazeScaler — Unreleased
+
+* Add full-frame and gaze-region DLSS5 / DLSS NR support on D3D12 DLSS SR and RR paths, with an external NR module.
+* Add independent NR ROI size, reduced-resolution inference, reconstruction and gaze-motion handling.
+* Organize the main DLSS5 settings around injection mode, direct preview and independent gaze controls; show HUDfix capture settings on the HUDfix route.
+* Finalize colour-supported local ROI edge correction with fixed spatial decay, smooth outer blending and stronger bounded temporal stabilization. Remove the ineffective independent surrounding-tone option.
+* Suspend cross-frame NR scheduling and disable its legacy configuration switches.
+* Credit OptiScaler_DLSSNR's exposure/white-point work, document this fork's adaptation, and include attribution and license notices in the Release package.
+* Keep development reports, replay tools, fixtures and disassembly output out of the release source tree; retain the shader build script and gaze-input bridges.
+
+
 ## v0.7.8
 * Everything after 0.7.7-pre9 including major FSR4, HUDfix, UI improvements, SL spoof, ASI loading support, auto game patches etc.
 * More OptiFG improvements

@@ -459,6 +459,92 @@ class Config
     CustomOptional<int> GazeRoiUdpPort { 38479 };
     CustomOptional<int> GazeRoiStaleMs { 50 };
 
+    // Experimental full-frame DLSS-NR filter. It is deliberately independent of Gaze ROI.
+    CustomOptional<bool> DLSSNREnabled { false };
+    // Experimental: run at the existing HUDfix scene capture, before its FG copy.
+    CustomOptional<bool> DLSSNRLateHudless { false };
+    // Suspended pipeline experiment; legacy ini values are forced off on load.
+    CustomOptional<bool> DLSSNRPipelineDebug { false };
+    // Retained for experimental implementation compatibility, forced off on load.
+    CustomOptional<bool> DLSSNRPipelineSplit { false };
+    // Retained for experimental implementation compatibility, forced off on load.
+    CustomOptional<bool> DLSSNRPipelineAsync { false };
+    CustomOptional<std::wstring, NoDefault> DLSSNRLibraryPath;
+    CustomOptional<int, NoDefault> DLSSNRStyle;
+    CustomOptional<int, NoDefault> DLSSNRPreset;
+    CustomOptional<float, NoDefault> DLSSNRIntensity;
+    CustomOptional<float, NoDefault> DLSSNRLocalToneStrength;
+    CustomOptional<float, NoDefault> DLSSNRLocalStructureStrength;
+    CustomOptional<float, NoDefault> DLSSNRSkinStructureStrength;
+    CustomOptional<bool, NoDefault> DLSSNRUseAutoMask;
+    CustomOptional<bool, NoDefault> DLSSNRUICorrection;
+    CustomOptional<bool> DLSSNRFullResolutionGuidance { false };
+    CustomOptional<bool> DLSSNRDebugInputView { false };
+    // Diagnostic isolation switch: stage the three-panel debug view without
+    // necessarily copying it into the game's output.
+    CustomOptional<bool> DLSSNRDebugInputViewComposite { true };
+    // Legacy ini alias, migrated to PresentPreview=2 and disabled on load.
+    CustomOptional<bool> DLSSNRDebugModelOutput { false };
+    // Direct output: 0 = off, 1 = model input, 2 = model output, 3 = HUDfix scene.
+    CustomOptional<uint32_t> DLSSNRPresentPreview { 0 };
+    CustomOptional<float> DLSSNRPreviewWhiteNits { 203.0f };
+    // Diagnostic A/B: construct the model Color by downsampling the complete
+    // DLSS output first, then crop the gaze ROI from that fixed full-frame grid.
+    CustomOptional<bool> DLSSNRDebugGlobalDownsampleOutput { false };
+    // Diagnostic opt-out from the default SDR filmic input and source-anchored
+    // HDR highlight restoration.
+    CustomOptional<bool> DLSSNRLegacyHDRTransfer { false };
+    CustomOptional<float, NoDefault> DLSSNRHDRPaperWhite;
+    // HDR white-point source: 0 = manual paper white, 1 = game's ExposureTexture when supplied.
+    // The shader falls back to the manual value if the game does not expose a valid texture/sample.
+    CustomOptional<uint32_t> DLSSNRWhitePointSource { 1 };
+    // Multiplier applied to the game's preExposure/exposure ratio. This is the small per-game trim;
+    // it is independent from the manual paper-white value used when source is 0.
+    CustomOptional<float> DLSSNRExposureScale { 1.0f };
+    // Experimental integer low-resolution residual path: 0/1 disables, 2 or 3
+    // runs NR at one half or one third of the DLSS output edge length.
+    CustomOptional<int, NoDefault> DLSSNRLowResolutionScale;
+    // Retains the low-resolution NR input but asks the NR feature to produce a
+    // display-resolution result, which is then fused as a guided residual.
+    CustomOptional<bool> DLSSNRLowResolutionFullOutput { false };
+    // Reprojects raw NR output using the model's actual motion/depth inputs.
+    CustomOptional<bool> DLSSNROutputTemporalStabilization { false };
+    // Stabilizes only the low-resolution NR residual over time, then uses its
+    // confidence to select sharp or soft color-guided reconstruction.
+    CustomOptional<bool> DLSSNRTemporalResidualReconstruction { false };
+    // Experimental high-resolution color-guided reconstruction of the full
+    // low-resolution NR residual. Uses the original image only as an edge guide.
+    CustomOptional<bool> DLSSNRHighResolutionGuidedResidual { false };
+    // Diagnostic opt-out from the default multi-field reconstruction.
+    CustomOptional<bool> DLSSNRLegacyResidualReconstruction { false };
+    // Default 3x3 RGB affine fit. Disable for the older 5x5 fit with
+    // source-footprint purity checks.
+    CustomOptional<bool> DLSSNRFastReconstruction { true };
+    // Keep the original-resolution motion resource, logical subrect and scale
+    // when Color/Depth use the scale-2/3 DLSS5 input path.
+    CustomOptional<bool> DLSSNRLowResolutionOriginalMVec { false };
+    // Diagnostic guide-contract experiments for low-resolution NR.
+    CustomOptional<bool> DLSSNRLowResolutionMVecScale { false };
+    CustomOptional<bool> DLSSNRCloneTypelessDepth { false };
+    CustomOptional<bool> DLSSNRZeroMotionInput { false };
+    CustomOptional<bool> DLSSNRZeroDepthInput { false };
+    // Diagnostic opt-out from gaze-ROI origin-delta injection. The original
+    // game motion vectors and their ROI subrect remain in use.
+    CustomOptional<bool> DLSSNRDisableGazeRoiMotionInjection { false };
+    // Independent DLSS-NR gaze ROI. Shares the gaze input with DLSS, while
+    // keeping its output dimensions separate from DLSS Super Resolution ROI.
+    CustomOptional<bool> DLSSNRGazeRoiEnabled { false };
+    CustomOptional<int> DLSSNRGazeRoiWidthPx { 1280 };
+    CustomOptional<int> DLSSNRGazeRoiHeightPx { 720 };
+    // 1 = native ROI output, 2/3 = half/third ROI edge resolution.
+    CustomOptional<int> DLSSNRGazeRoiScale { 1 };
+    // Independent output-space band used to fade DLSS5 into the pre-NR image.
+    CustomOptional<int> DLSSNRGazeRoiEdgeBlendPx { 96 };
+    // Colour-guided local boundary correction with bounded coefficient history.
+    CustomOptional<bool> DLSSNRGazeRoiExtrapolation { false };
+    // Local edge correction reach, independent of its decay speed.
+    CustomOptional<int> DLSSNRGazeRoiExtrapolationDistancePx { 512 };
+
     CustomOptional<int32_t, NoDefault> ColorResourceBarrier;    // disabled by default
     CustomOptional<int32_t, NoDefault> MVResourceBarrier;       // disabled by default
     CustomOptional<int32_t, NoDefault> DepthResourceBarrier;    // disabled by default

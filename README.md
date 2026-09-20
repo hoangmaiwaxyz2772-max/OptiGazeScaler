@@ -1,25 +1,43 @@
-# Experimental Fork Notice
+# OptiGazeScaler
 
-This is a personal experimental fork of OptiScaler. It is not an official upstream OptiScaler release.
+OptiGazeScaler is an experimental fork of [OptiScaler](https://github.com/optiscaler/OptiScaler) with gaze-driven rendering and **DLSS5 / DLSS Neural Rendering (NR)** integration. It is not an official upstream OptiScaler release.
 
-This branch adds an experimental D3D12 DLSS Super Resolution ROI prototype for gaze-driven local upscaling. The idea is to run the expensive upscaler only around the gaze region, while the peripheral image uses cheaper upscaling, blur, and lightweight temporal stabilization.
+## Gaze-driven DLSS Super Resolution
 
-The feature is still a research prototype intended for experiments and real-game testing. It is not a stable feature, and compatibility with all games is not guaranteed. Other OptiScaler features have not been fully tested with this experiment and may conflict with it.
+The original focus of this fork is **gaze-driven local DLSS upscaling** on D3D12. It runs DLSS Super Resolution only in a configurable region of interest (ROI) around the gaze point, while the peripheral image uses cheaper reconstruction, optional blur and lightweight temporal stabilization. The local DLSS result is blended into the surrounding image.
 
-## Current Scope
+The goal is to reduce the GPU cost of expensive upscaling models while retaining their image quality where the user is looking. The gaze region does not need to be tiny: a large ROI covering roughly half the output pixels can substantially reduce the DLSS work area and move the transition boundary farther from the visual center. In an ideal workload this could approach halving the DLSS processing cost, but peripheral reconstruction, compositing and fixed overhead mean it does not imply halving the total frame time or doubling the frame rate.
 
-- The current implementation targets **D3D12 + DLSS Super Resolution**.
-- It has been observed to work together with **FSR 3 Frame Generation**.
-- Other upscalers, frame generation methods, and graphics APIs are theoretically possible, but each path needs separate adaptation.
+Dedicated eye-tracking hardware is optional. Ordinary camera-based gaze estimation can supply the gaze point through the external input bridge; mouse and keyboard controls are also available. A larger ROI can accommodate less precise gaze input and make peripheral quality differences less noticeable.
 
-## Goal And Potential Benefit
+### Scope and controls
 
-The goal is to reduce the GPU cost of expensive upscaling models by processing only the region the user is looking at, while using a cheaper path for the peripheral image.
+- The local upscaling implementation targets **D3D12 + DLSS Super Resolution**.
+- It has been observed to work together with **FSR 3 Frame Generation**. Other frame-generation combinations, upscalers and graphics APIs need separate compatibility work.
+- Open **Gaze ROI DLSS** to enable the feature, set the ROI dimensions and adjust edge feathering or peripheral reconstruction. Use **Gaze ROI Control** to choose the shared gaze source.
+- This remains an experimental feature. Game compatibility, peripheral stability and interaction with other OptiScaler features vary; support for all combinations is not established.
 
-Even without dedicated eye-tracking hardware, ordinary camera-based gaze estimation can provide a usable gaze point. The gaze region also does not need to be tiny: even a large ROI covering roughly half of the output pixels can significantly reduce the DLSS work area, theoretically approaching a halving of DLSS cost. With a large ROI, the transition boundary is farther from the visual center, which also makes peripheral stability and blending issues easier to hide.
+See the [gaze rendering guide](docs/GazeROI.md) and [external gaze input setup](docs/GazeRoiExternalInput.md). These DLSS Super Resolution ROI controls are independent of the DLSS5 / NR controls below: local DLSS upscaling can be used without enabling NR, and NR can process either a full-frame DLSS result or the result of local DLSS upscaling.
 
-For the original OptiScaler project, official releases, and upstream documentation, see:
-https://github.com/optiscaler/OptiScaler
+## DLSS5 and gaze-driven DLSS5
+
+This fork supports full-frame DLSS5 and an independent **gaze ROI DLSS5** mode on the D3D12 DLSS Super Resolution / Ray Reconstruction path. Full-frame mode processes the completed image; gaze mode limits NR inference to a configurable rectangle around the gaze point. DLSS5 ROI dimensions and resolution scale are independent of the existing DLSS Super Resolution ROI settings.
+
+- **Three injection modes:** after post-processing through HUDfix capture, linear scene with automatic exposure, or linear scene with a manual white point.
+- **Lower-resolution inference:** reduce model resolution and reconstruct the model's changes over the original image.
+- **Optional ROI edge correction:** colour-aware local extrapolation, a smooth outer fade and bounded temporal stabilization help soften the ROI transition. The separate surrounding-tone experiment has been removed.
+- **Direct previews:** captured HUDfix scene, SDR model input and SDR model output, ordered by processing stage.
+- **Shared gaze input:** mouse, keyboard, shared memory or legacy UDP; dedicated eye-tracking hardware is optional.
+
+Open **DLSS5 / NR** in the main overlay to configure NR, and **Gaze ROI Control** for the shared gaze source. DLSS5 is disabled by default. Supply a compatible external NR module separately; it is not bundled. See the [DLSS5 guide](docs/DLSS5.md), [configuration reference](Config.md#dlss5--dlss-nr-d3d12) and [gaze input guide](docs/GazeRoiExternalInput.md).
+
+The existing [DLSS gaze ROI](docs/GazeROI.md) and FSR frame-generation ROI features remain separate. The cross-frame NR asynchronous scheduling experiment is suspended and its settings are forced off. Compatibility, ROI seam quality and performance depend on the game, GPU and external model; a smaller model work area does not guarantee a proportional frame-rate gain.
+
+## Acknowledgements
+
+Thank you to the OptiScaler authors and contributors, and to **Dagherbou** and the contributors to [OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) for their NR integration and exposure/white-point work used as a reference for this fork's adaptation. The current automatic-exposure path samples the game's exposure texture directly; it is not a copy of their image-metering algorithm. Source references, adaptation scope and license notices are in [CREDITS.md](CREDITS.md).
+
+The following sections retain the upstream OptiScaler overview and installation information. Their upstream download links do not provide this fork's DLSS5/gaze features.
 
 ---
 
@@ -204,6 +222,8 @@ Please check [this](Config.md) document for configuration parameters and explana
 * And the whole DLSS2FSR community for all their support
 
 ## Credit
+Fork-specific code attribution and license references: [CREDITS.md](CREDITS.md).
+
 This project uses [FreeType](https://gitlab.freedesktop.org/freetype/freetype) licensed under the [FTL](https://gitlab.freedesktop.org/freetype/freetype/-/blob/master/docs/FTL.TXT)
 
 ## Sponsors
@@ -215,4 +235,3 @@ This project uses [FreeType](https://gitlab.freedesktop.org/freetype/freetype) l
   </tr>
  </tbody>
 </table>
-

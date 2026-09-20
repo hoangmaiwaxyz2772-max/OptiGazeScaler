@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "menu_common.h"
 
 #include "input/input_system.h"
@@ -20,6 +20,7 @@
 #include <upscaler_time/UpscalerTime_Vk.h>
 #include <upscaler_time/UpscalerTime_Dx11.h>
 #include <upscaler_time/UpscalerTime_Dx12.h>
+#include <upscalers/dlssnr/DLSSNRFeature_Dx12.h>
 
 #include <imgui/imgui_internal.h>
 #include <imgui/ImGuiNotify.hpp>
@@ -3457,6 +3458,203 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     }
 }
 
+void MenuCommon::RenderHudfixCaptureControls(RenderMenuContext& ctx, bool late)
+{
+    auto& state = ctx.state;
+    auto config = ctx.config;
+    const auto menuResScale = ctx.menuResScale;
+    ImGui::BeginDisabled(!late && !config->FGHUDFix.value_or_default());
+
+    if (!late) ImGui::SameLine(0.0f, 16.0f);
+    ImGui::PushItemWidth(95.0f * menuResScale);
+    int hudFixLimit = config->FGHUDLimit.value_or_default();
+    if (ImGui::InputInt(late ? "Capture index" : "Limit", &hudFixLimit))
+    {
+        if (hudFixLimit < 1)
+            hudFixLimit = 1;
+        else if (hudFixLimit > 999)
+            hudFixLimit = 999;
+
+        config->FGHUDLimit = hudFixLimit;
+        LOG_DEBUG("Enabled set FGHUDLimit: {}", hudFixLimit);
+    }
+    ShowHelpMarker("Delay HUDless capture, high values might cause crash!");
+
+    ImGui::SameLine(0.0f, 16.0f);
+    if (ImGui::Button("Resources##2"))
+        _showHudlessWindow = !_showHudlessWindow;
+
+    ImGui::EndDisabled();
+
+    auto hudExtended = config->FGHUDFixExtended.value_or_default();
+    if (ImGui::Checkbox("Extended", &hudExtended))
+    {
+        LOG_DEBUG("Enabled set FGHUDFixExtended: {}", hudExtended);
+        config->FGHUDFixExtended = hudExtended;
+    }
+    ShowHelpMarker("Extended format checks for possible Hudless\nMight cause crashes and slowdowns!");
+    ImGui::SameLine(0.0f, 16.0f);
+
+    ImGui::BeginDisabled(!late && !config->FGHUDFix.value_or_default());
+
+    auto immediate = config->FGImmediateCapture.value_or_default();
+    if (ImGui::Checkbox("Immediate Capture", &immediate))
+    {
+        LOG_DEBUG("Enabled set FGImmediateCapture: {}", immediate);
+        config->FGImmediateCapture = immediate;
+    }
+    ShowHelpMarker("Enables capturing of resources before shader execution.\nIncrease Hudless "
+                   "capture chances, but might cause capturing of unnecessary resources.");
+
+    ImGui::PopItemWidth();
+
+    ImGui::EndDisabled();
+}
+
+void MenuCommon::RenderHudfixCaptureAdvanced(RenderMenuContext& ctx)
+{
+    auto& state = ctx.state;
+    auto config = ctx.config;
+    const auto menuResScale = ctx.menuResScale;
+    auto rb = config->FGResourceBlocking.value_or_default();
+    if (ImGui::Checkbox("Resource Blocking", &rb))
+    {
+        config->FGResourceBlocking = rb;
+        LOG_DEBUG("Enabled set FGResourceBlocking: {}", rb);
+    }
+    ShowHelpMarker("Block rarely used resources from using as Hudless \n"
+                   "to prevent flickers and other issues\n\n"
+                   "HUDfix enable/disable will reset the block list!");
+
+    ImGui::SameLine(0.0f, 16.0f);
+
+    auto rrc = config->FGRelaxedResolutionCheck.value_or_default();
+    if (ImGui::Checkbox("Relaxed Resource Check", &rrc))
+    {
+        config->FGRelaxedResolutionCheck = rrc;
+        LOG_DEBUG("Enabled set FGRelaxedResolutionCheck: {}", rrc);
+    }
+    ShowHelpMarker("Relax resolution checks for Hudless by 32 pixels \n"
+                   "Helps games which use black borders for some \n"
+                   "resolutions and screen ratios (e.g. Witcher 3)");
+
+    ImGui::BeginDisabled(state.fgResetCapturedResources);
+    ImGui::PushItemWidth(95.0f * menuResScale);
+    if (ImGui::Checkbox("Create List", &state.fgCaptureResources))
+    {
+        if (!state.fgCaptureResources)
+            config->FGHUDLimit = 1;
+        else
+            state.fgOnlyUseCapturedResources = false;
+    }
+
+    ImGui::SameLine(0.0f, 16.0f);
+    if (ImGui::Checkbox("Use List", &state.fgOnlyUseCapturedResources))
+    {
+        if (state.fgCaptureResources)
+        {
+            state.fgCaptureResources = false;
+            config->FGHUDLimit = 1;
+        }
+    }
+
+    ImGui::SameLine(0.0f, 8.0f);
+    ImGui::Text("(%llu)", static_cast<unsigned long long>(state.fgCapturedResourceCount));
+
+    ImGui::PopItemWidth();
+
+    ImGui::SameLine(0.0f, 16.0f);
+
+    if (ImGui::Button("Reset List"))
+    {
+        LOG_DEBUG("Resetting captured resource list");
+
+        state.fgResetCapturedResources = true;
+        state.fgOnlyUseCapturedResources = false;
+    }
+
+    ImGui::EndDisabled();
+
+    ImGui::Spacing();
+    ImGui::Spacing();
+    if (ImGui::TreeNode("Tracking Settings"))
+    {
+        auto ath = config->FGAlwaysTrackHeaps.value_or_default();
+        if (ImGui::Checkbox("Always Track Heaps", &ath))
+        {
+            config->FGAlwaysTrackHeaps = ath;
+            LOG_DEBUG("Enabled set FGAlwaysTrackHeaps: {}", ath);
+        }
+        ShowHelpMarker("Always track resources, might cause performance issues\n, but also might "
+                       "fix HUDFix related crashes!");
+
+        auto disableRTV = config->FGHudfixDisableRTV.value_or_default();
+        if (ImGui::Checkbox("Disable RTV Tracking", &disableRTV))
+            config->FGHudfixDisableRTV = disableRTV;
+        ShowHelpMarker("Disable tracking of CreateRenderTargetView\n"
+                       "This might help filtering of wrong hudless resources");
+
+        ImGui::SameLine(0.0f, 16.0f);
+
+        auto disableSRV = config->FGHudfixDisableSRV.value_or_default();
+        if (ImGui::Checkbox("Disable SRV Tracking", &disableSRV))
+            config->FGHudfixDisableSRV = disableSRV;
+        ShowHelpMarker("Disable tracking of CreateShaderResourceView\n"
+                       "This might help filtering of wrong Hudless resources");
+
+        auto disableUAV = config->FGHudfixDisableUAV.value_or_default();
+        if (ImGui::Checkbox("Disable UAV Tracking", &disableUAV))
+            config->FGHudfixDisableUAV = disableUAV;
+        ShowHelpMarker("Disable tracking of CreateUnorderedAccessView\n"
+                       "This might help filtering of wrong Hudless resources");
+
+        ImGui::SameLine(0.0f, 16.0f);
+
+        auto disableOM = config->FGHudfixDisableOM.value_or_default();
+        if (ImGui::Checkbox("Disable OM Tracking", &disableOM))
+            config->FGHudfixDisableOM = disableOM;
+        ShowHelpMarker("Disable tracking of OMSetRenderTargets\n"
+                       "This might help filtering of wrong Hudless resources");
+
+        auto disableSCR = config->FGHudfixDisableSCR.value_or_default();
+        if (ImGui::Checkbox("Disable SCR Tracking", &disableSCR))
+            config->FGHudfixDisableSCR = disableSCR;
+        ShowHelpMarker("Disable tracking of SetComputeRootDescriptorTable\n"
+                       "This might help filtering of wrong Hudless resources");
+
+        ImGui::SameLine(0.0f, 16.0f);
+
+        auto disableSGR = config->FGHudfixDisableSGR.value_or_default();
+        if (ImGui::Checkbox("Disable SGR Tracking", &disableSGR))
+            config->FGHudfixDisableSGR = disableSGR;
+        ShowHelpMarker("Disable tracking of SetGraphicsRootDescriptorTable\n"
+                       "This might help filtering of wrong Hudless resources");
+
+        ImGui::Spacing();
+
+        auto disableDI = config->FGHudfixDisableDI.value_or_default();
+        if (ImGui::Checkbox("Disable DI Tracking", &disableDI))
+            config->FGHudfixDisableDI = disableDI;
+        ShowHelpMarker("Disable tracking of DrawInstanced\n"
+                       "This might help filtering of wrong Hudless resources");
+
+        ImGui::SameLine(0.0f, 16.0f);
+
+        auto disableDII = config->FGHudfixDisableDII.value_or_default();
+        if (ImGui::Checkbox("Disable DII Tracking", &disableDII))
+            config->FGHudfixDisableDII = disableDII;
+        ShowHelpMarker("Disable tracking of DrawIndexedInstanced\n"
+                       "This might help filtering of wrong Hudless resources");
+
+        auto disableDispatch = config->FGHudfixDisableDispatch.value_or_default();
+        if (ImGui::Checkbox("Disable Dispatch Tracking", &disableDispatch))
+            config->FGHudfixDisableDispatch = disableDispatch;
+        ShowHelpMarker("Disable tracking of Dispatch\n"
+                       "This might help filtering of wrong Hudless resources");
+
+        ImGui::TreePop();
+    }
+}
 void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -4207,52 +4405,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
                 ShowHelpMarker("Enable HUD stability fix, might cause crashes!");
 
-                ImGui::BeginDisabled(!config->FGHUDFix.value_or_default());
-
-                ImGui::SameLine(0.0f, 16.0f);
-                ImGui::PushItemWidth(95.0f * menuResScale);
-                int hudFixLimit = config->FGHUDLimit.value_or_default();
-                if (ImGui::InputInt("Limit", &hudFixLimit))
-                {
-                    if (hudFixLimit < 1)
-                        hudFixLimit = 1;
-                    else if (hudFixLimit > 999)
-                        hudFixLimit = 999;
-
-                    config->FGHUDLimit = hudFixLimit;
-                    LOG_DEBUG("Enabled set FGHUDLimit: {}", hudFixLimit);
-                }
-                ShowHelpMarker("Delay HUDless capture, high values might cause crash!");
-
-                ImGui::SameLine(0.0f, 16.0f);
-                if (ImGui::Button("Res##2"))
-                    _showHudlessWindow = !_showHudlessWindow;
-
-                ImGui::EndDisabled();
-
-                auto hudExtended = config->FGHUDFixExtended.value_or_default();
-                if (ImGui::Checkbox("Extended", &hudExtended))
-                {
-                    LOG_DEBUG("Enabled set FGHUDFixExtended: {}", hudExtended);
-                    config->FGHUDFixExtended = hudExtended;
-                }
-                ShowHelpMarker("Extended format checks for possible Hudless\nMight cause crashes and slowdowns!");
-                ImGui::SameLine(0.0f, 16.0f);
-
-                ImGui::BeginDisabled(!config->FGHUDFix.value_or_default());
-
-                auto immediate = config->FGImmediateCapture.value_or_default();
-                if (ImGui::Checkbox("Immediate Capture", &immediate))
-                {
-                    LOG_DEBUG("Enabled set FGImmediateCapture: {}", immediate);
-                    config->FGImmediateCapture = immediate;
-                }
-                ShowHelpMarker("Enables capturing of resources before shader execution.\nIncrease Hudless "
-                               "capture chances, but might cause capturing of unnecessary resources.");
-
-                ImGui::PopItemWidth();
-
-                ImGui::EndDisabled();
+                RenderHudfixCaptureControls(ctx, false);
             }
 
             bool depthScale = config->FGEnableDepthScale.value_or_default();
@@ -4283,144 +4436,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 {
                     ImGui::Spacing();
 
-                    auto rb = config->FGResourceBlocking.value_or_default();
-                    if (ImGui::Checkbox("Resource Blocking", &rb))
-                    {
-                        config->FGResourceBlocking = rb;
-                        LOG_DEBUG("Enabled set FGResourceBlocking: {}", rb);
-                    }
-                    ShowHelpMarker("Block rarely used resources from using as Hudless \n"
-                                   "to prevent flickers and other issues\n\n"
-                                   "HUDfix enable/disable will reset the block list!");
-
-                    ImGui::SameLine(0.0f, 16.0f);
-
-                    auto rrc = config->FGRelaxedResolutionCheck.value_or_default();
-                    if (ImGui::Checkbox("Relaxed Resource Check", &rrc))
-                    {
-                        config->FGRelaxedResolutionCheck = rrc;
-                        LOG_DEBUG("Enabled set FGRelaxedResolutionCheck: {}", rrc);
-                    }
-                    ShowHelpMarker("Relax resolution checks for Hudless by 32 pixels \n"
-                                   "Helps games which use black borders for some \n"
-                                   "resolutions and screen ratios (e.g. Witcher 3)");
-
-                    ImGui::BeginDisabled(state.fgResetCapturedResources);
-                    ImGui::PushItemWidth(95.0f * menuResScale);
-                    if (ImGui::Checkbox("FG Create List", &state.fgCaptureResources))
-                    {
-                        if (!state.fgCaptureResources)
-                            config->FGHUDLimit = 1;
-                        else
-                            state.fgOnlyUseCapturedResources = false;
-                    }
-
-                    ImGui::SameLine(0.0f, 16.0f);
-                    if (ImGui::Checkbox("FG Use List", &state.fgOnlyUseCapturedResources))
-                    {
-                        if (state.fgCaptureResources)
-                        {
-                            state.fgCaptureResources = false;
-                            config->FGHUDLimit = 1;
-                        }
-                    }
-
-                    ImGui::SameLine(0.0f, 8.0f);
-                    ImGui::Text("(%d)", state.fgCapturedResourceCount);
-
-                    ImGui::PopItemWidth();
-
-                    ImGui::SameLine(0.0f, 16.0f);
-
-                    if (ImGui::Button("Reset List"))
-                    {
-                        LOG_DEBUG("Resetting captured resource list");
-
-                        state.fgResetCapturedResources = true;
-                        state.fgOnlyUseCapturedResources = false;
-                    }
-
-                    ImGui::EndDisabled();
-
-                    ImGui::Spacing();
-                    ImGui::Spacing();
-                    if (ImGui::TreeNode("Tracking Settings"))
-                    {
-                        auto ath = config->FGAlwaysTrackHeaps.value_or_default();
-                        if (ImGui::Checkbox("Always Track Heaps", &ath))
-                        {
-                            config->FGAlwaysTrackHeaps = ath;
-                            LOG_DEBUG("Enabled set FGAlwaysTrackHeaps: {}", ath);
-                        }
-                        ShowHelpMarker("Always track resources, might cause performance issues\n, but also might "
-                                       "fix HUDFix related crashes!");
-
-                        auto disableRTV = config->FGHudfixDisableRTV.value_or_default();
-                        if (ImGui::Checkbox("Disable RTV Tracking", &disableRTV))
-                            config->FGHudfixDisableRTV = disableRTV;
-                        ShowHelpMarker("Disable tracking of CreateRenderTargetView\n"
-                                       "This might help filtering of wrong hudless resources");
-
-                        ImGui::SameLine(0.0f, 16.0f);
-
-                        auto disableSRV = config->FGHudfixDisableSRV.value_or_default();
-                        if (ImGui::Checkbox("Disable SRV Tracking", &disableSRV))
-                            config->FGHudfixDisableSRV = disableSRV;
-                        ShowHelpMarker("Disable tracking of CreateShaderResourceView\n"
-                                       "This might help filtering of wrong Hudless resources");
-
-                        auto disableUAV = config->FGHudfixDisableUAV.value_or_default();
-                        if (ImGui::Checkbox("Disable UAV Tracking", &disableUAV))
-                            config->FGHudfixDisableUAV = disableUAV;
-                        ShowHelpMarker("Disable tracking of CreateUnorderedAccessView\n"
-                                       "This might help filtering of wrong Hudless resources");
-
-                        ImGui::SameLine(0.0f, 16.0f);
-
-                        auto disableOM = config->FGHudfixDisableOM.value_or_default();
-                        if (ImGui::Checkbox("Disable OM Tracking", &disableOM))
-                            config->FGHudfixDisableOM = disableOM;
-                        ShowHelpMarker("Disable tracking of OMSetRenderTargets\n"
-                                       "This might help filtering of wrong Hudless resources");
-
-                        auto disableSCR = config->FGHudfixDisableSCR.value_or_default();
-                        if (ImGui::Checkbox("Disable SCR Tracking", &disableSCR))
-                            config->FGHudfixDisableSCR = disableSCR;
-                        ShowHelpMarker("Disable tracking of SetComputeRootDescriptorTable\n"
-                                       "This might help filtering of wrong Hudless resources");
-
-                        ImGui::SameLine(0.0f, 16.0f);
-
-                        auto disableSGR = config->FGHudfixDisableSGR.value_or_default();
-                        if (ImGui::Checkbox("Disable SGR Tracking", &disableSGR))
-                            config->FGHudfixDisableSGR = disableSGR;
-                        ShowHelpMarker("Disable tracking of SetGraphicsRootDescriptorTable\n"
-                                       "This might help filtering of wrong Hudless resources");
-
-                        ImGui::Spacing();
-
-                        auto disableDI = config->FGHudfixDisableDI.value_or_default();
-                        if (ImGui::Checkbox("Disable DI Tracking", &disableDI))
-                            config->FGHudfixDisableDI = disableDI;
-                        ShowHelpMarker("Disable tracking of DrawInstanced\n"
-                                       "This might help filtering of wrong Hudless resources");
-
-                        ImGui::SameLine(0.0f, 16.0f);
-
-                        auto disableDII = config->FGHudfixDisableDII.value_or_default();
-                        if (ImGui::Checkbox("Disable DII Tracking", &disableDII))
-                            config->FGHudfixDisableDII = disableDII;
-                        ShowHelpMarker("Disable tracking of DrawIndexedInstanced\n"
-                                       "This might help filtering of wrong Hudless resources");
-
-                        auto disableDispatch = config->FGHudfixDisableDispatch.value_or_default();
-                        if (ImGui::Checkbox("Disable Dispatch Tracking", &disableDispatch))
-                            config->FGHudfixDisableDispatch = disableDispatch;
-                        ShowHelpMarker("Disable tracking of Dispatch\n"
-                                       "This might help filtering of wrong Hudless resources");
-
-                        ImGui::TreePop();
-                    }
+                    RenderHudfixCaptureAdvanced(ctx);
                 }
 
                 ImGui::Spacing();
@@ -5797,6 +5813,416 @@ void MenuCommon::RenderMagnifierSettings(RenderMenuContext& ctx)
     }
 }
 
+void MenuCommon::RenderGazeRoiControlSettings(RenderMenuContext& ctx)
+{
+    ImGui::Spacing();
+    if (auto ch = ScopedCollapsingHeader("Gaze ROI Control"); ch.IsHeaderOpen())
+    {
+        ScopedIndent indent {};
+        auto config = ctx.config;
+
+        std::string control = config->GazeRoiControl.value_or_default();
+        const char* currentControl = control == "Mouse"                  ? "Mouse"
+                                     : control == "ExternalUdp"          ? "ExternalUdp"
+                                     : control == "ExternalSharedMemory" ? "ExternalSharedMemory"
+                                                                          : "Keyboard";
+        if (ImGui::BeginCombo("Control", currentControl))
+        {
+            if (ImGui::Selectable("Mouse", control == "Mouse"))
+                config->GazeRoiControl = "Mouse";
+            if (ImGui::Selectable("ExternalUdp", control == "ExternalUdp"))
+                config->GazeRoiControl = "ExternalUdp";
+            if (ImGui::Selectable("ExternalSharedMemory", control == "ExternalSharedMemory"))
+                config->GazeRoiControl = "ExternalSharedMemory";
+            if (ImGui::Selectable("Keyboard",
+                                  control != "Mouse" && control != "ExternalUdp" &&
+                                      control != "ExternalSharedMemory"))
+                config->GazeRoiControl = "Keyboard";
+            ImGui::EndCombo();
+        }
+        ShowHelpMarker("Shared gaze position input for DLSS, DLSS5 and FSR frame generation. "
+                       "Each feature's ROI size is configured separately in its own settings.");
+
+        if (config->GazeRoiControl.value_or_default() == "ExternalUdp" ||
+            config->GazeRoiControl.value_or_default() == "ExternalSharedMemory")
+        {
+            if (config->GazeRoiControl.value_or_default() == "ExternalUdp")
+            {
+                int udpPort = std::clamp(config->GazeRoiUdpPort.value_or_default(), 1024, 65535);
+                if (ImGui::InputInt("UDP Port", &udpPort, 1, 100))
+                    config->GazeRoiUdpPort = std::clamp(udpPort, 1024, 65535);
+            }
+
+            int staleMs = std::clamp(config->GazeRoiStaleMs.value_or_default(), 1, 1000);
+            if (ImGui::InputInt("Stale", &staleMs, 1, 10))
+                config->GazeRoiStaleMs = std::clamp(staleMs, 1, 1000);
+            ShowHelpMarker(config->GazeRoiControl.value_or_default() == "ExternalSharedMemory"
+                               ? "External gaze is read from Local\\EyeTracingGazeV1 shared memory. Stale is the age "
+                                 "in milliseconds after which the last gaze point is frozen until fresh data arrives."
+                               : "External gaze packets are read from localhost UDP. Stale is the age in milliseconds "
+                                 "after which the last gaze point is frozen until fresh data arrives.");
+        }
+
+        ImGui::TextDisabled("Keyboard: F5/F6/F7/F8 move, F9 centers.");
+        ImGui::Spacing();
+    }
+}
+
+void MenuCommon::RenderDlssNrSettings(RenderMenuContext& ctx)
+{
+    const bool usesDlss = ctx.currentFeature != nullptr &&
+                          (ctx.currentFeature->GetUpscalerType() == Upscaler::DLSS ||
+                           ctx.currentFeature->GetUpscalerType() == Upscaler::DLSSD);
+    if (!usesDlss)
+        return;
+
+    ImGui::Spacing();
+    if (auto ch = ScopedCollapsingHeader("DLSS5 / NR"); ch.IsHeaderOpen())
+    {
+        ScopedIndent indent {};
+        auto config = ctx.config;
+        const bool gazeRoiEnabled = config->GazeRoiEnabled.value_or_default();
+        if (gazeRoiEnabled)
+            ImGui::TextDisabled("DLSS ROI is active; NR can still use its independent gaze region after ROI DLSS.");
+
+        bool enabled = config->DLSSNREnabled.value_or_default();
+        if (ImGui::Checkbox("Enable DLSS NR", &enabled))
+            config->DLSSNREnabled = enabled;
+        ShowHelpMarker("Runs the external DLSS-NR NGX module after DLSS Super Resolution or Ray Reconstruction and before frame-generation capture. "
+                       "Choose an injection mode below. If the external module or required resources are unavailable, NR is skipped.");
+
+        ImGui::BeginDisabled(!enabled);
+        ImGui::SeparatorText("Input and preview");
+        int injectionMode = config->DLSSNRLateHudless.value_or_default() ? 0 :
+            config->DLSSNRWhitePointSource.value_or_default() == 1 ? 1 : 2;
+        const char* injectionModes[] = {
+            "After post-processing (HUDfix)",
+            "Linear scene - automatic exposure",
+            "Linear scene - manual white point" };
+        if (ImGui::Combo("Injection mode", &injectionMode, injectionModes, IM_ARRAYSIZE(injectionModes)))
+        {
+            config->DLSSNRLateHudless = injectionMode == 0;
+            if (injectionMode != 0)
+                config->DLSSNRWhitePointSource = injectionMode == 1 ? 1u : 0u;
+            ctx.state.clearCapturedHudlesses = true;
+            // A scene preview cannot remain selected on a linear injection path.
+            if (injectionMode != 0 && config->DLSSNRPresentPreview.value_or_default() == 3)
+                config->DLSSNRPresentPreview = 0u;
+        }
+        ShowHelpMarker("HUDfix uses the selected scene after game post-processing. No matching capture means NR is skipped. "
+                       "Linear modes use the DLSS output before game post-processing, with automatic exposure or a manual white point. "
+                       "Automatic exposure falls back to the configured manual white point if game exposure is unavailable.");
+        const bool lateHudless = injectionMode == 0;
+        if (injectionMode == 1)
+        {
+            float exposureScale = config->DLSSNRExposureScale.value_or_default();
+            if (ImGui::SliderFloat("Exposure trim", &exposureScale, 0.25f, 4.0f, "%.3fx",
+                                   ImGuiSliderFlags_Logarithmic))
+                config->DLSSNRExposureScale = std::clamp(exposureScale, 0.01f, 16.0f);
+            ShowHelpMarker("Adjusts the game's automatic exposure. Leave at 1.0 unless brightness needs a correction.");
+        }
+        else if (injectionMode == 2)
+        {
+            float paperWhite = config->DLSSNRHDRPaperWhite.value_or(2.044f);
+            if (ImGui::InputFloat("Manual white point", &paperWhite, 0.0f, 0.0f, "%.4g"))
+                config->DLSSNRHDRPaperWhite = std::max(paperWhite, 0.001f);
+            ShowHelpMarker("Reference white in the game's linear scene values, used when preparing the SDR model input.");
+        }
+
+        // Preserve the stored preview IDs while ordering the menu by processing stage.
+        int previewMode = static_cast<int>(config->DLSSNRPresentPreview.value_or_default());
+        const std::vector<MenuOption<int>> previewModes {
+            { 0, "Off", "Show the normal processed game image." },
+            { 3, "Captured game frame", lateHudless
+                ? "Show the full HUDfix scene before NR, preserving its display brightness."
+                : "Available with the HUDfix injection mode. Linear scene captures cannot be displayed directly.",
+                !lateHudless },
+            { 1, "Model input (SDR)", "Show the prepared color image immediately before model evaluation." },
+            { 2, "Model output (SDR)", "Show the raw model result before restoration, stabilization and reconstruction." }
+        };
+        PopulateCombo("Direct output", previewMode, previewModes);
+        if (previewMode != static_cast<int>(config->DLSSNRPresentPreview.value_or_default()))
+        {
+            config->DLSSNRPresentPreview = static_cast<uint32_t>(previewMode);
+            config->DLSSNRDebugModelOutput = false;
+        }
+        ShowHelpMarker("Replaces the final screen image before Present, bypassing game post-processing and HUD. "
+                       "Model views use bilinear resizing and preserve the image aspect ratio. "
+                       "The latest completed capture may have a small delay. OptiScaler's menu remains available.");
+        if ((previewMode == 1 || previewMode == 2) && ctx.state.isHdrActive)
+        {
+            float previewWhite = config->DLSSNRPreviewWhiteNits.value_or_default();
+            if (ImGui::SliderFloat("Preview SDR white (nits)", &previewWhite, 80.0f, 400.0f, "%.0f"))
+                config->DLSSNRPreviewWhiteNits = previewWhite;
+            ShowHelpMarker("Display brightness of the SDR preview on an HDR screen. Does not change model exposure or game brightness.");
+        }
+
+        if (lateHudless)
+        {
+            ImGui::PushID("DLSSNRHudfix");
+            ImGui::SeparatorText("HUDfix capture");
+            RenderHudfixCaptureControls(ctx, true);
+            ShowHelpMarker("Capture selection is shared with OptiFG and also works with frame generation off. "
+                           "Use Resources to choose capture sources, and Direct output to inspect the captured frame. "
+                           "If NR was disabled at startup, save and restart before using HUDfix capture.");
+            if (ImGui::TreeNode("Advanced capture settings"))
+            {
+                RenderHudfixCaptureAdvanced(ctx);
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+
+        ImGui::SeparatorText("Resolution and processing");
+        bool nrGazeEnabled = config->DLSSNRGazeRoiEnabled.value_or_default();
+        if (ImGui::Checkbox("DLSS NR Gaze ROI", &nrGazeEnabled))
+            config->DLSSNRGazeRoiEnabled = nrGazeEnabled;
+        ShowHelpMarker("Runs DLSS NR only in the gaze rectangle, independently of DLSS Super Resolution ROI. "
+                       "Uses the shared Gaze ROI Control input with its own output dimensions.");
+        int nrGazeScaleIndex = std::clamp(config->DLSSNRGazeRoiScale.value_or_default(), 1, 3) - 1;
+        if (ImGui::Combo("DLSS NR render scale", &nrGazeScaleIndex, "1x (full resolution)\0"
+                                                               "1/2 edge\0"
+                                                               "1/3 edge\0"))
+            config->DLSSNRGazeRoiScale = std::clamp(nrGazeScaleIndex + 1, 1, 3);
+        ShowHelpMarker("Controls the DLSS NR input resolution globally. With Gaze ROI enabled, the scale applies to the gaze rectangle; otherwise it applies to the full DLSS output.");
+
+        bool nrOutputTemporal = config->DLSSNROutputTemporalStabilization.value_or_default();
+        if (ImGui::Checkbox("DLSS NR output temporal stabilization", &nrOutputTemporal))
+            config->DLSSNROutputTemporalStabilization = nrOutputTemporal;
+        ShowHelpMarker("Stabilizes model changes relative to the current input, preserving input detail and local contrast. "
+                       "Reliable pixels build up to 95% history, including moving Gaze ROI; input/depth changes reject it. "
+                       "Uncertain resampling of model-only detail reduces blending. Adds one compute pass and output copy; "
+                       "memory and GPU cost scale with the model output resolution.");
+
+        if (nrGazeEnabled && ImGui::TreeNode("Gaze region and blending"))
+        {
+            int maxGazeWidth = 8192;
+            int maxGazeHeight = 8192;
+            if (ctx.currentFeature != nullptr)
+            {
+                maxGazeWidth = std::max(64, static_cast<int>(ctx.currentFeature->TargetWidth()));
+                maxGazeHeight = std::max(64, static_cast<int>(ctx.currentFeature->TargetHeight()));
+            }
+            static int pendingNrGazeWidth = -1;
+            static int pendingNrGazeHeight = -1;
+            static int appliedNrGazeWidth = -1;
+            static int appliedNrGazeHeight = -1;
+
+            const int configuredNrGazeWidth =
+                std::clamp(config->DLSSNRGazeRoiWidthPx.value_or_default(), 64, maxGazeWidth);
+            const int configuredNrGazeHeight =
+                std::clamp(config->DLSSNRGazeRoiHeightPx.value_or_default(), 64, maxGazeHeight);
+            if (appliedNrGazeWidth != configuredNrGazeWidth || appliedNrGazeHeight != configuredNrGazeHeight)
+            {
+                pendingNrGazeWidth = configuredNrGazeWidth;
+                pendingNrGazeHeight = configuredNrGazeHeight;
+                appliedNrGazeWidth = configuredNrGazeWidth;
+                appliedNrGazeHeight = configuredNrGazeHeight;
+            }
+
+            pendingNrGazeWidth = std::clamp(pendingNrGazeWidth, 64, maxGazeWidth);
+            pendingNrGazeHeight = std::clamp(pendingNrGazeHeight, 64, maxGazeHeight);
+            if (ImGui::InputInt("DLSS NR Gaze ROI width##DLSSNR", &pendingNrGazeWidth, 8, 64))
+                pendingNrGazeWidth = std::clamp(pendingNrGazeWidth, 64, maxGazeWidth);
+            if (ImGui::InputInt("DLSS NR Gaze ROI height##DLSSNR", &pendingNrGazeHeight, 8, 64))
+                pendingNrGazeHeight = std::clamp(pendingNrGazeHeight, 64, maxGazeHeight);
+
+            const bool nrGazeResolutionChanged = pendingNrGazeWidth != configuredNrGazeWidth ||
+                                                 pendingNrGazeHeight != configuredNrGazeHeight;
+            ImGui::BeginDisabled(!nrGazeResolutionChanged);
+            if (ImGui::Button("Apply DLSS NR Gaze ROI resolution"))
+            {
+                config->DLSSNRGazeRoiWidthPx = pendingNrGazeWidth;
+                config->DLSSNRGazeRoiHeightPx = pendingNrGazeHeight;
+                appliedNrGazeWidth = pendingNrGazeWidth;
+                appliedNrGazeHeight = pendingNrGazeHeight;
+                LOG_INFO("Applied DLSS NR Gaze ROI resolution: {}x{}", pendingNrGazeWidth, pendingNrGazeHeight);
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled(nrGazeResolutionChanged ? "pending" : "applied");
+            ShowHelpMarker("DLSS NR output-space ROI dimensions, independent of the DLSS ROI size. "
+                           "Edits take effect together only after pressing the apply button.");
+            constexpr int maxNrGazeEdgeBlend = 512;
+            int nrGazeEdgeBlend = std::clamp(config->DLSSNRGazeRoiEdgeBlendPx.value_or_default(),
+                                             0, maxNrGazeEdgeBlend);
+            if (ImGui::InputInt("DLSS NR ROI edge blend (px)", &nrGazeEdgeBlend, 1, 16))
+                config->DLSSNRGazeRoiEdgeBlendPx = std::clamp(nrGazeEdgeBlend, 0, maxNrGazeEdgeBlend);
+            ShowHelpMarker("Fades the processed DLSS NR result into the original pre-NR image along all four ROI edges. "
+                           "A rounded-rectangle distance field removes corner joins, and a smooth ramp suppresses visible "
+                           "lines at both sides of the band. This setting is independent from DLSS ROI Feather. Edges "
+                           "touching the full image boundary are not faded in ordinary blending. Long-range extrapolation "
+                           "keeps its rounded shape at screen edges to avoid a shape switch. Width is in output pixels; 0 "
+                           "keeps a hard boundary. With exterior extrapolation enabled, wide blends extend up to "
+                           "half the shorter ROI side.");
+            bool nrExtrapolation = config->DLSSNRGazeRoiExtrapolation.value_or_default();
+            if (ImGui::Checkbox("DLSS NR ROI edge correction", &nrExtrapolation))
+                config->DLSSNRGazeRoiExtrapolation = nrExtrapolation;
+            ShowHelpMarker("Colour-protected local edge correction. Decay and temporal stability are "
+                           "retained as gaze moves. Requires a nonzero ROI edge-blend width.");
+            int nrExtrapolationWidth = std::clamp(
+                config->DLSSNRGazeRoiExtrapolationDistancePx.value_or_default(), 0, 512);
+            ImGui::BeginDisabled(!nrExtrapolation);
+            if (ImGui::SliderInt("DLSS NR local edge reach (px)", &nrExtrapolationWidth, 0, 512))
+                config->DLSSNRGazeRoiExtrapolationDistancePx = nrExtrapolationWidth;
+            ImGui::EndDisabled();
+            ShowHelpMarker("Local reach only; decay stays fixed. Zero disables the exterior local correction.");
+            ImGui::TreePop();
+        }
+        const int menuLowResolutionScale = std::clamp(config->DLSSNRGazeRoiScale.value_or_default(), 1, 3);
+
+        ImGui::Spacing();
+        if (ImGui::TreeNode("Model appearance"))
+        {
+            int style = config->DLSSNRStyle.value_or(0);
+            if (ImGui::InputInt("Style", &style))
+                config->DLSSNRStyle = style;
+            float intensity = config->DLSSNRIntensity.value_or(0.0f);
+            if (ImGui::InputFloat("Intensity", &intensity, 0.0f, 0.0f, "%.6g"))
+                config->DLSSNRIntensity = intensity;
+            float localTone = config->DLSSNRLocalToneStrength.value_or(0.0f);
+            if (ImGui::InputFloat("Local Tone Strength", &localTone, 0.0f, 0.0f, "%.6g"))
+                config->DLSSNRLocalToneStrength = localTone;
+            float localStructure = config->DLSSNRLocalStructureStrength.value_or(0.0f);
+            if (ImGui::InputFloat("Local Structure Strength", &localStructure, 0.0f, 0.0f, "%.6g"))
+                config->DLSSNRLocalStructureStrength = localStructure;
+            float skinStructure = config->DLSSNRSkinStructureStrength.value_or(0.0f);
+            if (ImGui::InputFloat("Skin Structure Strength", &skinStructure, 0.0f, 0.0f, "%.6g"))
+                config->DLSSNRSkinStructureStrength = skinStructure;
+
+            bool autoMask = config->DLSSNRUseAutoMask.value_or(false);
+            if (ImGui::Checkbox("Auto Mask", &autoMask))
+                config->DLSSNRUseAutoMask = autoMask;
+
+            ImGui::TreePop();
+        }
+
+        const bool lowResolutionFullOutput = config->DLSSNRLowResolutionFullOutput.value_or_default();
+        ImGui::Spacing();
+        if (ImGui::TreeNode("Advanced diagnostics"))
+        {
+            const auto guideDimensions = DLSSNRFeatureDx12::GetLastOriginalGuideDimensions();
+            if (guideDimensions.observed)
+            {
+                ImGui::TextDisabled("Original MVec: %ux%u", guideDimensions.motionWidth,
+                                    guideDimensions.motionHeight);
+                ImGui::TextDisabled("  Texture: %ux%u, base: %u,%u", guideDimensions.motionAllocationWidth,
+                                    guideDimensions.motionAllocationHeight, guideDimensions.motionBaseX,
+                                    guideDimensions.motionBaseY);
+                ImGui::TextDisabled("Original Depth: %ux%u", guideDimensions.depthWidth,
+                                    guideDimensions.depthHeight);
+                ImGui::TextDisabled("  Texture: %ux%u, base: %u,%u", guideDimensions.depthAllocationWidth,
+                                    guideDimensions.depthAllocationHeight, guideDimensions.depthBaseX,
+                                    guideDimensions.depthBaseY);
+            }
+            else
+            {
+                ImGui::TextDisabled("Original MVec / Depth: waiting for DLSS NR evaluation");
+            }
+
+            bool legacyReconstruction = !config->DLSSNRFastReconstruction.value_or_default();
+            ImGui::BeginDisabled(menuLowResolutionScale < 2 || menuLowResolutionScale > 3 ||
+                                 lowResolutionFullOutput ||
+                                 config->DLSSNRLegacyResidualReconstruction.value_or_default());
+            if (ImGui::Checkbox("Use legacy 5x5 reconstruction", &legacyReconstruction))
+                config->DLSSNRFastReconstruction = !legacyReconstruction;
+            ImGui::EndDisabled();
+            ShowHelpMarker("Uses the older, more expensive 5x5 fit with source-footprint purity checks. "
+                           "The default is the optimized 3x3 reconstruction. Legacy residual reconstruction "
+                           "takes precedence. Switching does not reset model or temporal history.");
+
+            bool nrOriginalMVec = config->DLSSNRLowResolutionOriginalMVec.value_or_default();
+            ImGui::BeginDisabled(nrGazeScaleIndex == 0);
+            if (ImGui::Checkbox("Use original-resolution MVec", &nrOriginalMVec))
+                config->DLSSNRLowResolutionOriginalMVec = nrOriginalMVec;
+            ImGui::EndDisabled();
+            ShowHelpMarker("For 1/2 or 1/3 DLSS NR input, keeps the game's original MVec resolution, subrect and scale. "
+                           "Gaze ROI still crops the active MVec rectangle and applies ROI-origin motion without "
+                           "downsampling it. DLSS NR output stabilization and temporal residual reconstruction use "
+                           "the same MVec contract. This takes precedence over zero-motion and legacy MVec-scale diagnostics.");
+
+            static std::array<char, 2048> libraryPathBuffer {};
+            static std::wstring synchronizedPath;
+            const std::wstring configuredPath = config->DLSSNRLibraryPath.value_or(std::wstring {});
+            if (configuredPath != synchronizedPath)
+            {
+                const std::string utf8Path = wstring_to_string(configuredPath);
+                strncpy_s(libraryPathBuffer.data(), libraryPathBuffer.size(), utf8Path.c_str(), _TRUNCATE);
+                synchronizedPath = configuredPath;
+            }
+            if (ImGui::InputText("External DLL Path", libraryPathBuffer.data(), libraryPathBuffer.size()))
+            {
+                synchronizedPath = string_to_wstring(libraryPathBuffer.data());
+                config->DLSSNRLibraryPath = synchronizedPath;
+            }
+            ShowHelpMarker("Optional absolute-path override. Leave empty or auto to find nvngx_dlssnr.dll, then "
+                           "nvngx.dll_dlssnr.dll in the same folder as OptiScaler. Restart the game after changing this path.");
+
+            bool useLegacyReconstruction = config->DLSSNRLegacyResidualReconstruction.value_or_default();
+            ImGui::BeginDisabled(menuLowResolutionScale < 2 || menuLowResolutionScale > 3 ||
+                                 lowResolutionFullOutput);
+            if (ImGui::Checkbox("Use legacy residual reconstruction", &useLegacyReconstruction))
+                config->DLSSNRLegacyResidualReconstruction = useLegacyReconstruction;
+            ImGui::EndDisabled();
+            ShowHelpMarker("The default multi-field reconstruction keeps original high-resolution detail as its "
+                           "anchor and applies broad model changes as smooth fields. Enable this diagnostic to "
+                           "switch back to the original low-resolution residual reconstruction.");
+
+            bool useLegacyHdrTransfer = config->DLSSNRLegacyHDRTransfer.value_or_default();
+            if (ImGui::Checkbox("Use legacy HDR transfer", &useLegacyHdrTransfer))
+                config->DLSSNRLegacyHDRTransfer = useLegacyHdrTransfer;
+            ShowHelpMarker("The normal scene path uses filmic tone mapping and source-anchored HDR restoration. "
+                           "Enable this diagnostic to switch it to the logarithmic transfer. The late HUDless "
+                           "path preserves ordinary display brightness and rolls off HDR highlights independently.");
+
+            bool debugGlobalDownsample = config->DLSSNRDebugGlobalDownsampleOutput.value_or_default();
+            ImGui::BeginDisabled(!nrGazeEnabled || menuLowResolutionScale < 2 || menuLowResolutionScale > 3);
+            if (ImGui::Checkbox("Downsample full frame before ROI", &debugGlobalDownsample))
+                config->DLSSNRDebugGlobalDownsampleOutput = debugGlobalDownsample;
+            ImGui::EndDisabled();
+            ShowHelpMarker("Single-variable gaze-ROI A/B test. It builds the model Color by downsampling the "
+                           "complete post-DLSS frame on a fixed full-screen grid and cropping the ROI afterward. "
+                           "The normal path crops first and downsamples second. Motion, depth, ROI injection, HDR "
+                           "transfer, the DLSS NR model, residual reconstruction, and writeback remain unchanged.");
+
+            bool debugInputView = config->DLSSNRDebugInputView.value_or_default();
+            if (ImGui::Checkbox("Show color / motion / depth inputs", &debugInputView))
+                config->DLSSNRDebugInputView = debugInputView;
+            ShowHelpMarker("Overlays three one-ninth-screen diagnostic views along the bottom edge. The views show "
+                           "the actual Color, MVec, and Depth resources supplied to DLSS NR.");
+
+            bool disableRoiMotionInjection =
+                config->DLSSNRDisableGazeRoiMotionInjection.value_or_default();
+            ImGui::BeginDisabled(!nrGazeEnabled);
+            if (ImGui::Checkbox("Disable ROI motion-vector injection", &disableRoiMotionInjection))
+                config->DLSSNRDisableGazeRoiMotionInjection = disableRoiMotionInjection;
+            ImGui::EndDisabled();
+            ShowHelpMarker("Gaze-ROI diagnostic. When enabled, DLSS NR receives the game's original motion-vector "
+                           "values for the active ROI without adding the ROI-origin delta. The motion subrect, "
+                           "scale, optional low-resolution resampling, and reset policy remain unchanged. This "
+                           "takes precedence over the zero-motion diagnostic.");
+
+            bool zeroMotionInput = config->DLSSNRZeroMotionInput.value_or_default();
+            ImGui::BeginDisabled(nrGazeEnabled && disableRoiMotionInjection);
+            if (ImGui::Checkbox("Zero motion input for NR", &zeroMotionInput))
+                config->DLSSNRZeroMotionInput = zeroMotionInput;
+            ImGui::EndDisabled();
+            ShowHelpMarker("Replaces the motion resource supplied to DLSS NR with a typed texture containing only "
+                           "zero vectors. The game's motion resource is not modified. Original-ROI-motion mode "
+                           "takes precedence while the gaze ROI is active.");
+
+            bool zeroDepthInput = config->DLSSNRZeroDepthInput.value_or_default();
+            if (ImGui::Checkbox("Zero depth input for NR", &zeroDepthInput))
+                config->DLSSNRZeroDepthInput = zeroDepthInput;
+            ShowHelpMarker("Replaces the depth resource supplied to DLSS NR with a typed texture containing only "
+                           "zero depth values.");
+
+            ImGui::TreePop();
+        }
+        ImGui::EndDisabled();
+    }
+}
+
 void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
 {
     auto config = ctx.config;
@@ -5831,8 +6257,6 @@ void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
                              "region and a half-resolution Color + Depth + MV denoiser in the periphery."
                            : "Experimental D3D12 DLSS SR path. Uses a separate ROI DLSS feature and composites it "
                              "back over a low-cost full-frame upscale.");
-
-        ImGui::BeginDisabled(!enabled);
 
         int maxWidthPx = 8192;
         int maxHeightPx = 8192;
@@ -6123,51 +6547,6 @@ void MenuCommon::RenderGazeRoiSettings(RenderMenuContext& ctx)
             }
         }
 
-        std::string control = config->GazeRoiControl.value_or_default();
-        const char* currentControl = control == "Mouse"                    ? "Mouse"
-                                     : control == "ExternalUdp"            ? "ExternalUdp"
-                                     : control == "ExternalSharedMemory"   ? "ExternalSharedMemory"
-                                                                            : "Keyboard";
-        if (ImGui::BeginCombo("Control", currentControl))
-        {
-            if (ImGui::Selectable("Mouse", control == "Mouse"))
-                config->GazeRoiControl = "Mouse";
-            if (ImGui::Selectable("ExternalUdp", control == "ExternalUdp"))
-                config->GazeRoiControl = "ExternalUdp";
-            if (ImGui::Selectable("ExternalSharedMemory", control == "ExternalSharedMemory"))
-                config->GazeRoiControl = "ExternalSharedMemory";
-            if (ImGui::Selectable("Keyboard",
-                                  control != "Mouse" && control != "ExternalUdp" &&
-                                      control != "ExternalSharedMemory"))
-                config->GazeRoiControl = "Keyboard";
-            ImGui::EndCombo();
-        }
-
-        if (config->GazeRoiControl.value_or_default() == "ExternalUdp" ||
-            config->GazeRoiControl.value_or_default() == "ExternalSharedMemory")
-        {
-            if (config->GazeRoiControl.value_or_default() == "ExternalUdp")
-            {
-                int udpPort = std::clamp(config->GazeRoiUdpPort.value_or_default(), 1024, 65535);
-                if (ImGui::InputInt("UDP Port", &udpPort, 1, 100))
-                    config->GazeRoiUdpPort = std::clamp(udpPort, 1024, 65535);
-            }
-
-            int staleMs = std::clamp(config->GazeRoiStaleMs.value_or_default(), 1, 1000);
-            if (ImGui::InputInt("Stale", &staleMs, 1, 10))
-                config->GazeRoiStaleMs = std::clamp(staleMs, 1, 1000);
-            ShowHelpMarker(config->GazeRoiControl.value_or_default() == "ExternalSharedMemory"
-                               ? "External gaze is read from Local\\EyeTracingGazeV1 shared memory. Stale is the age "
-                                 "after which the last gaze point is frozen until fresh data arrives. Private DLSS "
-                                 "history continues at that fixed ROI."
-                               : "External gaze packets are read from localhost UDP. Stale is the age after which "
-                                 "the last gaze point is frozen until fresh data arrives. Private DLSS history "
-                                 "continues at that fixed ROI.");
-        }
-
-        ImGui::TextDisabled("Keyboard: F5/F6/F7/F8 move, F9 centers.");
-
-        ImGui::EndDisabled();
         ImGui::Spacing();
     }
 }
@@ -7235,8 +7614,9 @@ void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
     {
         ImGui::TableNextColumn();
 
-        // Left column: active upscaler state, frame generation, FSR common, latency and fakenvapi controls.
+        // Left column: active upscaler state, DLSS5/NR, frame generation, FSR common, latency and fakenvapi controls.
         RenderActiveUpscalerSettings(ctx);
+        RenderDlssNrSettings(ctx);
         RenderFrameGenerationSelection(ctx);
         RenderFrameGenerationRuntimeSettings(ctx);
         RenderFsrCommonSettings(ctx);
@@ -7251,6 +7631,7 @@ void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
 
         // Right column: image quality, initialization, advanced options, appearance, overlay and input settings.
         RenderActiveImageSettings(ctx);
+        RenderGazeRoiControlSettings(ctx);
         RenderGazeRoiSettings(ctx);
         RenderMagnifierSettings(ctx);
         RenderQuirksSettings(ctx);
@@ -7610,13 +7991,14 @@ void MenuCommon::RenderHudlessResourcesWindow(RenderMenuContext& ctx, ImGuiWindo
     auto& io = ctx.io;
 
     auto fg = state.currentFG;
-    if (_showHudlessWindow && config->FGHUDFix.value_or_default() && fg != nullptr && fg->IsActive())
+    const bool late = config->DLSSNREnabled.value_or_default() && config->DLSSNRLateHudless.value_or_default();
+    if (_showHudlessWindow && (late || (config->FGHUDFix.value_or_default() && fg != nullptr && fg->IsActive())))
     {
         auto posX = (io.DisplaySize.x - 400.0f) / 2.0f;
         auto posY = (io.DisplaySize.y - 300.0f) / 2.0f;
 
         ImGui::SetNextWindowPos(ImVec2 { posX, posY }, ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2 { 400.0f, 300.0f });
+        ImGui::SetNextWindowSize(ImVec2 { 600.0f, 360.0f }, ImGuiCond_FirstUseEver);
 
         if (ImGui::Begin("Hudless Resources", nullptr, flags))
         {
@@ -7624,6 +8006,13 @@ void MenuCommon::RenderHudlessResourcesWindow(RenderMenuContext& ctx, ImGuiWindo
                 ImGui::SetWindowFocus();
 
             int btnCount = 100;
+
+            if (late)
+            {
+                ImGui::TextWrapped("Selected HUDfix resources for DLSS5. Disable a source to try the next eligible capture location. Use DLSS NR direct output to preview the selected scene.");
+            }
+            if (state.capturedHudlesses.empty())
+                ImGui::TextDisabled("No selected resources yet. Check capture index, formats and tracking settings.");
 
             if (ImGui::BeginTable("HudlessTable", 2, ImGuiTableFlags_SizingFixedFit))
             {
@@ -7638,7 +8027,7 @@ void MenuCommon::RenderHudlessResourcesWindow(RenderMenuContext& ctx, ImGuiWindo
 
                     ImGui::TableSetColumnIndex(0);
 
-                    ImGui::Text("%08x, %s->%s, Count: %llu, %s", (size_t) it->first,
+                    ImGui::Text("%p, %s->%s, Count: %llu, %s", it->first,
                                 GetSourceString(it->second.captureInfo & 0xFF).c_str(),
                                 GetDispatchString(it->second.captureInfo & 0xFF00).c_str(), it->second.usageCount,
                                 it->second.enabled ? "Active" : "Passive");
@@ -7674,9 +8063,8 @@ void MenuCommon::RenderHudlessResourcesWindow(RenderMenuContext& ctx, ImGuiWindo
 
             if (ImGui::Button("Close##4"))
                 _showHudlessWindow = false;
-
-            ImGui::End();
         }
+        ImGui::End();
     }
 }
 

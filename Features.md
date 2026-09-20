@@ -1,4 +1,15 @@
-## Features
+## OptiGazeScaler additions
+
+* D3D12 DLSS5 / DLSS NR after DLSS Super Resolution or Ray Reconstruction, using an external NR module.
+* Independent gaze-region DLSS5 with configurable ROI dimensions, model resolution and edge blending.
+* Optional colour-supported ROI edge correction with bounded temporal stabilization and a smooth exterior fade.
+* HUDfix post-processing capture, automatic game exposure and manual white-point injection modes.
+* Direct captured-scene, SDR model-input and SDR model-output previews.
+* Shared gaze input and separate DLSS Super Resolution / FSR FG ROI controls.
+
+See the [DLSS5 guide](docs/DLSS5.md) for requirements and limitations. NR and edge correction are opt-in. Cross-frame asynchronous NR scheduling is disabled.
+
+## Upstream OptiScaler features
 * Supports multiple upscaling backends (XeSS, FSR 2.1.2, FSR 2.2.1, FSR 3.1 and DLSS)
 * Experimental support for frame generation (OptiFG by FSR) with version 0.7.0 and above
 * Supports DLSS 3.7 and above (check [installation instructions](#install-as-non-nvngx))

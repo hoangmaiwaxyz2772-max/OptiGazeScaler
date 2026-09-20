@@ -109,6 +109,7 @@ class Hudfix_Dx12
     static bool CheckCapture();
 
     static void HudlessFound(ID3D12GraphicsCommandList* cmdList);
+    static void RecordCapture(ResourceInfo* resource);
 
     static int GetIndex();
 

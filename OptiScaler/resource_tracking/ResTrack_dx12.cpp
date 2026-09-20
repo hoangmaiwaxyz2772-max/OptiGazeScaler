@@ -1,4 +1,11 @@
 #include "pch.h"
+#include <upscalers/dlssnr/DLSSNRLatePass.h>
+#include <upscalers/dlssnr/DLSSNRDiagnostics.h>
+#include <upscalers/dlssnr/DLSSNRCommandState.h>
+#include <upscalers/dlssnr/DLSSNRMethodHooks.h>
+#include <upscalers/dlssnr/DLSSNRPipelineTrace.h>
+#include <upscalers/dlssnr/DLSSNRPipelineSplit.h>
+#include <hooks/D3D12_Hooks.h>
 #include "ResTrack_dx12.h"
 
 #include <Config.h>
@@ -14,6 +21,72 @@
 #include <magic_enum_utility.hpp>
 #include <include/d3dx/d3dx12.h>
 #include <detours/detours.h>
+
+namespace
+{
+struct LateCaptureStats
+{
+    std::atomic<uint64_t> views[3] {}, defaults[3] {}, stored[3] {};
+    std::atomic<uint64_t> om {0}, omActive {0}, omMissingHeap {0}, omMissingView {0}, omFound {0};
+    std::atomic<uint64_t> graphicsTables {0}, computeTables {0}, consumers {0}, activeConsumers {0}, renderPasses {0};
+    std::atomic<uint64_t> indirect {0}, pendingIndirect {0};
+    std::atomic<uint64_t> draws[3] {}, pendingDraws[3] {}, suppressedDraws[3] {};
+} lateStats;
+// Raw entry points before Detours replaces originals with trampolines.
+std::array<std::atomic<uintptr_t>, 7> lateHookEntries {};
+constexpr unsigned lateHookSlots[] {12, 13, 14, 31, 32, 46, 59};
+constexpr const char* lateHookNames[] {"DrawInstanced", "DrawIndexedInstanced", "Dispatch", "ComputeTable", "GraphicsTable", "OM", "ExecuteIndirect"};
+std::string LateAddress(void* address)
+{
+    MEMORY_BASIC_INFORMATION memory {};
+    char path[MAX_PATH] {};
+    if (VirtualQuery(address, &memory, sizeof(memory)))
+        GetModuleFileNameA(static_cast<HMODULE>(memory.AllocationBase), path, MAX_PATH);
+    return std::format("0x{:X} {}+0x{:X}", reinterpret_cast<uintptr_t>(address), path,
+        reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(memory.AllocationBase));
+}
+void LateCommandIdentity(ID3D12GraphicsCommandList* commands)
+{
+    static DLSSNRDiagnostics::Gate gate;
+    if (!gate.Sample()) return;
+    auto table = *reinterpret_cast<void***>(commands);
+    LOG_INFO("[DLSSNR_DIAG][command-list] cmd=0x{:X} vtable=0x{:X} type={} pending={} upscale={} present={}",
+        (uintptr_t)commands, (uintptr_t)table, (UINT)commands->GetType(), DLSSNRLatePass::Pending(),
+        Hudfix_Dx12::ActiveUpscaleFrame(), Hudfix_Dx12::ActivePresentFrame());
+    for (unsigned i = 0; i < 7; ++i)
+        LOG_INFO("[DLSSNR_DIAG][hook-identity] method={} actual=[{}] installed=[{}] sameEntry={}",
+            lateHookNames[i], LateAddress(table[lateHookSlots[i]]),
+            LateAddress(reinterpret_cast<void*>(lateHookEntries[i].load())),
+            (uintptr_t)table[lateHookSlots[i]] == lateHookEntries[i].load());
+}
+using LateExecuteIndirect = void (STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandSignature*, UINT,
+    ID3D12Resource*, UINT64, ID3D12Resource*, UINT64);
+LateExecuteIndirect o_LateExecuteIndirect = nullptr;
+void STDMETHODCALLTYPE hkLateExecuteIndirect(ID3D12GraphicsCommandList* commands, ID3D12CommandSignature* signature,
+    UINT maxCount, ID3D12Resource* arguments, UINT64 offset, ID3D12Resource* countBuffer, UINT64 countOffset)
+{
+    // Observation only: an indirect workload does not pass through Draw/Dispatch hooks.
+    if (DLSSNRLatePass::Enabled() && !DLSSNRCommandState::suppress)
+    {
+        lateStats.indirect.fetch_add(1, std::memory_order_relaxed);
+        if (DLSSNRLatePass::Pending()) lateStats.pendingIndirect.fetch_add(1, std::memory_order_relaxed);
+        DLSSNR_DIAG("indirect-entry", "cmd=0x{:X} signature=0x{:X} maxCount={} pending={} active={}",
+            (uintptr_t)commands, (uintptr_t)signature, maxCount, DLSSNRLatePass::Pending(), Hudfix_Dx12::IsResourceCheckActive());
+    }
+    o_LateExecuteIndirect(commands, signature, maxCount, arguments, offset, countBuffer, countOffset);
+    if (!DLSSNRCommandState::suppress) DLSSNRPipelineTrace::Work(commands);
+}
+void LateViewObserved(unsigned kind, bool defaultView)
+{
+    if (!DLSSNRLatePass::TrackDescriptors()) return;
+    lateStats.views[kind].fetch_add(1, std::memory_order_relaxed);
+    if (defaultView) lateStats.defaults[kind].fetch_add(1, std::memory_order_relaxed);
+}
+void LateViewStored(unsigned kind)
+{
+    if (DLSSNRLatePass::TrackDescriptors()) lateStats.stored[kind].fetch_add(1, std::memory_order_relaxed);
+}
+}
 
 #ifndef STDMETHODCALLTYPE
 #include <Unknwn.h> // or <objbase.h> to get STDMETHODCALLTYPE
@@ -84,6 +157,12 @@ typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandLists)(ID3D12CommandQueue* Thi
 
 typedef ULONG(STDMETHODCALLTYPE* PFN_Release)(ID3D12Resource* This);
 
+using CaptureDrawInstanced = DLSSNRMethodHooks::MethodHook<12, PFN_DrawInstanced>;
+using CaptureDrawIndexedInstanced = DLSSNRMethodHooks::MethodHook<13, PFN_DrawIndexedInstanced>;
+using CaptureDispatch = DLSSNRMethodHooks::MethodHook<14, PFN_Dispatch>;
+using CaptureSetComputeRootDescriptorTable = DLSSNRMethodHooks::MethodHook<31, PFN_SetComputeRootDescriptorTable>;
+using CaptureSetGraphicsRootDescriptorTable = DLSSNRMethodHooks::MethodHook<32, PFN_SetGraphicsRootDescriptorTable>;
+
 // Original method calls for device
 static PFN_CreateRenderTargetView o_CreateRenderTargetView = nullptr;
 static PFN_CreateShaderResourceView o_CreateShaderResourceView = nullptr;
@@ -103,6 +182,41 @@ static PFN_DrawInstanced o_DrawInstanced = nullptr;
 static PFN_DrawIndexedInstanced o_DrawIndexedInstanced = nullptr;
 static PFN_ExecuteBundle o_ExecuteBundle = nullptr;
 static PFN_Close o_Close = nullptr;
+using PFN_LateReset = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*, ID3D12PipelineState*);
+using PFN_LateBeginRenderPass = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList4*, UINT,
+    const D3D12_RENDER_PASS_RENDER_TARGET_DESC*, const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*, D3D12_RENDER_PASS_FLAGS);
+using PFN_LateEndRenderPass = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList4*);
+static PFN_LateReset o_LateReset = nullptr;
+static PFN_LateBeginRenderPass o_LateBeginRenderPass = nullptr;
+static PFN_LateEndRenderPass o_LateEndRenderPass = nullptr;
+static HRESULT STDMETHODCALLTYPE hkLateReset(ID3D12GraphicsCommandList* list, ID3D12CommandAllocator* allocator,
+                                             ID3D12PipelineState* pipeline)
+{
+    HRESULT result = o_LateReset(list, allocator, pipeline);
+    if (SUCCEEDED(result))
+    {
+        DLSSNRPipelineTrace::ResetList(list);
+        const bool ready = ResTrack_Dx12::ObserveCommandList(list);
+        DLSSNRCommandState::Reset(list, pipeline, ready && Config::Instance()->DLSSNRLateHudless.value_or_default());
+    }
+    return result;
+}
+static void STDMETHODCALLTYPE hkLateBeginRenderPass(ID3D12GraphicsCommandList4* list, UINT count,
+    const D3D12_RENDER_PASS_RENDER_TARGET_DESC* targets, const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* depth,
+    D3D12_RENDER_PASS_FLAGS flags)
+{
+    if (Config::Instance()->DLSSNRLateHudless.value_or_default())
+    {
+        DLSSNRCommandState::RenderPass(list, true);
+        if (!DLSSNRCommandState::suppress) lateStats.renderPasses.fetch_add(1, std::memory_order_relaxed);
+    }
+    o_LateBeginRenderPass(list, count, targets, depth, flags);
+}
+static void STDMETHODCALLTYPE hkLateEndRenderPass(ID3D12GraphicsCommandList4* list)
+{
+    o_LateEndRenderPass(list);
+    if (Config::Instance()->DLSSNRLateHudless.value_or_default()) DLSSNRCommandState::RenderPass(list, false);
+}
 
 static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
 static PFN_Release o_Release = nullptr;
@@ -157,6 +271,12 @@ bool ResTrack_Dx12::CheckResource(ID3D12Resource* resource)
 
     if (resDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
         return false;
+
+    // Descriptor metadata outlives the current swapchain dimensions. The game
+    // may create its scene views before the swapchain or before a resize.
+    // Apply size/format selection at Hudfix::CheckResource when using the view.
+    if (DLSSNRLatePass::TrackDescriptors())
+        return true;
 
     auto& s = State::Instance();
 
@@ -525,6 +645,8 @@ void ResTrack_Dx12::FillResourceInfo(ID3D12Resource* resource, ResourceInfo* inf
 
 bool ResTrack_Dx12::IsHudFixActive()
 {
+    if (DLSSNRCommandState::suppress) return false;
+    if (DLSSNRLatePass::Pending()) return Hudfix_Dx12::IsResourceCheckActive();
     if (!Config::Instance()->FGEnabled.value_or_default() || !Config::Instance()->FGHUDFix.value_or_default())
     {
         LOG_TRACK(
@@ -571,6 +693,14 @@ bool ResTrack_Dx12::IsHudFixActive()
 
 #pragma region Resource input hooks
 
+static bool IsDefaultTexture2DView(ID3D12Resource* resource)
+{
+    if (!resource) return false;
+    const auto desc = resource->GetDesc();
+    return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        desc.DepthOrArraySize == 1 && desc.SampleDesc.Count == 1;
+}
+
 void ResTrack_Dx12::hkCreateRenderTargetView(ID3D12Device* This, ID3D12Resource* pResource,
                                              D3D12_RENDER_TARGET_VIEW_DESC* pDesc,
                                              D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
@@ -593,11 +723,13 @@ void ResTrack_Dx12::hkCreateRenderTargetView(ID3D12Device* This, ID3D12Resource*
     }
 
     o_CreateRenderTargetView(This, pResource, pDesc, DestDescriptor);
+    LateViewObserved(0, pDesc == nullptr);
 
     if (Config::Instance()->FGHudfixDisableRTV.value_or_default())
         return;
 
-    if (pResource == nullptr || pDesc == nullptr || pDesc->ViewDimension != D3D12_RTV_DIMENSION_TEXTURE2D ||
+    if (pResource == nullptr ||
+        (pDesc ? pDesc->ViewDimension != D3D12_RTV_DIMENSION_TEXTURE2D : !IsDefaultTexture2DView(pResource)) ||
         !CheckResource(pResource))
     {
         auto heap = GetHeapByCpuHandleRTV(DestDescriptor.ptr);
@@ -619,6 +751,7 @@ void ResTrack_Dx12::hkCreateRenderTargetView(ID3D12Device* This, ID3D12Resource*
         resInfo.type = RTV;
         resInfo.captureInfo = CaptureInfo::CreateRTV;
         heap->SetByCpuHandle(DestDescriptor.ptr, resInfo);
+        LateViewStored(0);
     }
     // else
     //{
@@ -648,11 +781,13 @@ void ResTrack_Dx12::hkCreateShaderResourceView(ID3D12Device* This, ID3D12Resourc
     }
 
     o_CreateShaderResourceView(This, pResource, pDesc, DestDescriptor);
+    LateViewObserved(1, pDesc == nullptr);
 
     if (Config::Instance()->FGHudfixDisableSRV.value_or_default())
         return;
 
-    if (pResource == nullptr || pDesc == nullptr || pDesc->ViewDimension != D3D12_SRV_DIMENSION_TEXTURE2D ||
+    if (pResource == nullptr ||
+        (pDesc ? pDesc->ViewDimension != D3D12_SRV_DIMENSION_TEXTURE2D : !IsDefaultTexture2DView(pResource)) ||
         !CheckResource(pResource))
     {
         auto heap = GetHeapByCpuHandleSRV(DestDescriptor.ptr);
@@ -674,6 +809,7 @@ void ResTrack_Dx12::hkCreateShaderResourceView(ID3D12Device* This, ID3D12Resourc
         resInfo.type = SRV;
         resInfo.captureInfo = CaptureInfo::CreateSRV;
         heap->SetByCpuHandle(DestDescriptor.ptr, resInfo);
+        LateViewStored(1);
     }
     // else
     //{
@@ -703,11 +839,13 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
     }
 
     o_CreateUnorderedAccessView(This, pResource, pCounterResource, pDesc, DestDescriptor);
+    LateViewObserved(2, pDesc == nullptr);
 
     if (Config::Instance()->FGHudfixDisableUAV.value_or_default())
         return;
 
-    if (pResource == nullptr || pDesc == nullptr || pDesc->ViewDimension != D3D12_UAV_DIMENSION_TEXTURE2D ||
+    if (pResource == nullptr ||
+        (pDesc ? pDesc->ViewDimension != D3D12_UAV_DIMENSION_TEXTURE2D : !IsDefaultTexture2DView(pResource)) ||
         !CheckResource(pResource))
     {
         auto heap = GetHeapByCpuHandleUAV(DestDescriptor.ptr);
@@ -729,6 +867,7 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
         resInfo.type = UAV;
         resInfo.captureInfo = CaptureInfo::CreateUAV;
         heap->SetByCpuHandle(DestDescriptor.ptr, resInfo);
+        LateViewStored(2);
     }
     // else
     //{
@@ -1016,7 +1155,10 @@ void ResTrack_Dx12::hkCopyDescriptors(ID3D12Device* This, UINT NumDestDescriptor
     if (NumDestDescriptorRanges == 0 || pDestDescriptorRangeStarts == nullptr)
         return;
 
-    if (!Config::Instance()->FGAlwaysTrackHeaps.value_or_default() && !IsHudFixActive())
+    // Copies may populate long-lived tables before upscaling or while late NR
+    // is toggled off. Capture eligibility must not gate descriptor metadata.
+    if (!DLSSNRLatePass::TrackDescriptors() &&
+        !Config::Instance()->FGAlwaysTrackHeaps.value_or_default() && !IsHudFixActive())
         return;
 
     const UINT inc = This->GetDescriptorHandleIncrementSize(DescriptorHeapsType);
@@ -1118,7 +1260,8 @@ void ResTrack_Dx12::hkCopyDescriptorsSimple(ID3D12Device* This, UINT NumDescript
         DescriptorHeapsType != D3D12_DESCRIPTOR_HEAP_TYPE_RTV)
         return;
 
-    if (!Config::Instance()->FGAlwaysTrackHeaps.value_or_default() && !IsHudFixActive())
+    if (!DLSSNRLatePass::TrackDescriptors() &&
+        !Config::Instance()->FGAlwaysTrackHeaps.value_or_default() && !IsHudFixActive())
         return;
 
     auto size = This->GetDescriptorHandleIncrementSize(DescriptorHeapsType);
@@ -1167,6 +1310,8 @@ void ResTrack_Dx12::hkCopyDescriptorsSimple(ID3D12Device* This, UINT NumDescript
 void ResTrack_Dx12::hkSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* This, UINT RootParameterIndex,
                                                      D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor)
 {
+    if (DLSSNRLatePass::Enabled() && !DLSSNRCommandState::suppress)
+        lateStats.graphicsTables.fetch_add(1, std::memory_order_relaxed);
     // Consistent early exit - always call original function
     auto shouldTrack = !Config::Instance()->FGHudfixDisableSGR.value_or_default() && BaseDescriptor.ptr != 0 &&
                        IsHudFixActive() && !Hudfix_Dx12::SkipHudlessChecks() &&
@@ -1174,7 +1319,7 @@ void ResTrack_Dx12::hkSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* 
 
     if (!shouldTrack)
     {
-        o_SetGraphicsRootDescriptorTable(This, RootParameterIndex, BaseDescriptor);
+        CaptureSetGraphicsRootDescriptorTable::Forward(This, RootParameterIndex, BaseDescriptor);
         return;
     }
 
@@ -1182,7 +1327,7 @@ void ResTrack_Dx12::hkSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* 
     if (heap == nullptr)
     {
         LOG_DEBUG_ONLY("No heap for handle: {:X}", BaseDescriptor.ptr);
-        o_SetGraphicsRootDescriptorTable(This, RootParameterIndex, BaseDescriptor);
+        CaptureSetGraphicsRootDescriptorTable::Forward(This, RootParameterIndex, BaseDescriptor);
         return;
     }
 
@@ -1191,7 +1336,7 @@ void ResTrack_Dx12::hkSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* 
     {
         LOG_DEBUG_ONLY("No resource at RootParameterIndex: {}, CommandList: {:X}, gpuHandle: {:X}", RootParameterIndex,
                        (SIZE_T) This, BaseDescriptor.ptr);
-        o_SetGraphicsRootDescriptorTable(This, RootParameterIndex, BaseDescriptor);
+        CaptureSetGraphicsRootDescriptorTable::Forward(This, RootParameterIndex, BaseDescriptor);
         return;
     }
 
@@ -1203,7 +1348,8 @@ void ResTrack_Dx12::hkSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* 
 
     // Track the resource
     bool capturedImmediately = false;
-    if (Config::Instance()->FGImmediateCapture.value_or_default())
+    if (Config::Instance()->FGImmediateCapture.value_or_default() &&
+        (!DLSSNRLatePass::Pending() || capturedBuffer->type == SRV))
     {
         capturedImmediately = Hudfix_Dx12::CheckForHudless(This, capturedBuffer, capturedBuffer->state);
     }
@@ -1251,7 +1397,7 @@ void ResTrack_Dx12::hkSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* 
         }
     }
 
-    o_SetGraphicsRootDescriptorTable(This, RootParameterIndex, BaseDescriptor);
+    CaptureSetGraphicsRootDescriptorTable::Forward(This, RootParameterIndex, BaseDescriptor);
 }
 
 #pragma endregion
@@ -1263,6 +1409,17 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
                                          BOOL RTsSingleHandleToDescriptorRange,
                                          D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor)
 {
+    ObserveCommandList(This);
+    const bool diagnose = DLSSNRLatePass::Enabled() && !DLSSNRCommandState::suppress;
+    if (diagnose)
+    {
+        lateStats.om.fetch_add(1, std::memory_order_relaxed);
+        LateCommandIdentity(This);
+        DLSSNR_DIAG("om-entry", "cmd=0x{:X} targets={} pending={} active={} skip={} disabled={} menu={}",
+            (uintptr_t)This, NumRenderTargetDescriptors, DLSSNRLatePass::Pending(), IsHudFixActive(),
+            Hudfix_Dx12::SkipHudlessChecks(), Config::Instance()->FGHudfixDisableOM.value_or_default(),
+            This == MenuOverlayDx::MenuCommandList());
+    }
     // Consistent early exit validation
     auto shouldTrack = !Config::Instance()->FGHudfixDisableOM.value_or_default() && NumRenderTargetDescriptors > 0 &&
                        pRenderTargetDescriptors != nullptr && IsHudFixActive() && !Hudfix_Dx12::SkipHudlessChecks() &&
@@ -1276,6 +1433,7 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
     }
 
     LOG_DEBUG_ONLY("NumRenderTargetDescriptors: {}", NumRenderTargetDescriptors);
+    if (diagnose) lateStats.omActive.fetch_add(1, std::memory_order_relaxed);
 
     auto fIndex = Hudfix_Dx12::ActivePresentFrame() % BUFFER_COUNT;
 
@@ -1291,6 +1449,7 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
             heap = GetHeapByCpuHandleRTV(pRenderTargetDescriptors[0].ptr);
             if (heap == nullptr)
             {
+                if (diagnose) lateStats.omMissingHeap.fetch_add(1, std::memory_order_relaxed);
                 LOG_DEBUG_ONLY("No heap at index: {}", i);
                 continue;
             }
@@ -1303,6 +1462,7 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
             heap = GetHeapByCpuHandleRTV(handle.ptr);
             if (heap == nullptr)
             {
+                if (diagnose) lateStats.omMissingHeap.fetch_add(1, std::memory_order_relaxed);
                 LOG_DEBUG_ONLY("No heap at index: {}", i);
                 continue;
             }
@@ -1311,17 +1471,27 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
         auto capturedBuffer = heap->GetByCpuHandle(handle.ptr);
         if (capturedBuffer == nullptr || capturedBuffer->buffer == nullptr)
         {
+            if (diagnose) lateStats.omMissingView.fetch_add(1, std::memory_order_relaxed);
             LOG_DEBUG_ONLY("No resource at index: {}, cpu: {:X}", i, handle.ptr);
             continue;
         }
 
         // Valid resource found, update state
+        if (diagnose)
+        {
+            lateStats.omFound.fetch_add(1, std::memory_order_relaxed);
+            DLSSNR_DIAG("om-candidate", "cmd=0x{:X} resource=0x{:X} size={}x{} format={} type={} mapSlot={} immediate={} pending={}",
+                (uintptr_t)This, (uintptr_t)capturedBuffer->buffer, capturedBuffer->width, capturedBuffer->height,
+                (UINT)capturedBuffer->format, (UINT)capturedBuffer->type, fIndex,
+                Config::Instance()->FGImmediateCapture.value_or_default(), DLSSNRLatePass::Pending());
+        }
         capturedBuffer->state = D3D12_RESOURCE_STATE_RENDER_TARGET;
         capturedBuffer->captureInfo = CaptureInfo::OMSetRTV;
 
         // Check for immediate capture
         bool capturedImmediately = false;
-        if (Config::Instance()->FGImmediateCapture.value_or_default())
+        if (Config::Instance()->FGImmediateCapture.value_or_default() &&
+        (!DLSSNRLatePass::Pending() || capturedBuffer->type == SRV))
         {
             capturedImmediately = Hudfix_Dx12::CheckForHudless(This, capturedBuffer, capturedBuffer->state);
             if (capturedImmediately)
@@ -1382,6 +1552,8 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
 void ResTrack_Dx12::hkSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* This, UINT RootParameterIndex,
                                                     D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor)
 {
+    if (DLSSNRLatePass::Enabled() && !DLSSNRCommandState::suppress)
+        lateStats.computeTables.fetch_add(1, std::memory_order_relaxed);
     // Consistent early exit - always call original function
     auto shouldTrack = !Config::Instance()->FGHudfixDisableSCR.value_or_default() && BaseDescriptor.ptr != 0 &&
                        IsHudFixActive() && !Hudfix_Dx12::SkipHudlessChecks() &&
@@ -1389,7 +1561,7 @@ void ResTrack_Dx12::hkSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* T
 
     if (!shouldTrack)
     {
-        o_SetComputeRootDescriptorTable(This, RootParameterIndex, BaseDescriptor);
+        CaptureSetComputeRootDescriptorTable::Forward(This, RootParameterIndex, BaseDescriptor);
         return;
     }
 
@@ -1397,7 +1569,7 @@ void ResTrack_Dx12::hkSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* T
     if (heap == nullptr)
     {
         LOG_DEBUG_ONLY("No heap for handle: {:X}", BaseDescriptor.ptr);
-        o_SetComputeRootDescriptorTable(This, RootParameterIndex, BaseDescriptor);
+        CaptureSetComputeRootDescriptorTable::Forward(This, RootParameterIndex, BaseDescriptor);
         return;
     }
 
@@ -1406,7 +1578,7 @@ void ResTrack_Dx12::hkSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* T
     {
         LOG_DEBUG_ONLY("No resource at RootParameterIndex: {}, CommandList: {:X}, gpuHandle: {:X}", RootParameterIndex,
                        (SIZE_T) This, BaseDescriptor.ptr);
-        o_SetComputeRootDescriptorTable(This, RootParameterIndex, BaseDescriptor);
+        CaptureSetComputeRootDescriptorTable::Forward(This, RootParameterIndex, BaseDescriptor);
         return;
     }
 
@@ -1422,7 +1594,8 @@ void ResTrack_Dx12::hkSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* T
 
     // Track the resource
     bool capturedImmediately = false;
-    if (Config::Instance()->FGImmediateCapture.value_or_default())
+    if (Config::Instance()->FGImmediateCapture.value_or_default() &&
+        (!DLSSNRLatePass::Pending() || capturedBuffer->type == SRV))
     {
         capturedImmediately = Hudfix_Dx12::CheckForHudless(This, capturedBuffer, capturedBuffer->state);
     }
@@ -1470,18 +1643,74 @@ void ResTrack_Dx12::hkSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* T
         }
     }
 
-    o_SetComputeRootDescriptorTable(This, RootParameterIndex, BaseDescriptor);
+    CaptureSetComputeRootDescriptorTable::Forward(This, RootParameterIndex, BaseDescriptor);
 }
 
 #pragma endregion
 
 #pragma region Shader finalizer hooks
 
+// HUDfix may capture shader INPUTS as well as render/UAV OUTPUTS. Late NR
+// must modify inputs before their consuming draw/dispatch; outputs are ready
+// only after their producing draw/dispatch. Both reuse the same candidate map.
+void ResTrack_Dx12::CheckLateInputs(ID3D12GraphicsCommandList* commands, UINT captureKind)
+{
+    if (DLSSNRLatePass::Enabled())
+    {
+        const unsigned kind = captureKind == CaptureInfo::DrawInstanced ? 0 :
+            captureKind == CaptureInfo::DrawIndexedInstanced ? 1 : 2;
+        lateStats.draws[kind].fetch_add(1, std::memory_order_relaxed);
+        if (DLSSNRCommandState::suppress) lateStats.suppressedDraws[kind].fetch_add(1, std::memory_order_relaxed);
+        else if (DLSSNRLatePass::Pending()) lateStats.pendingDraws[kind].fetch_add(1, std::memory_order_relaxed);
+        if (!DLSSNRCommandState::suppress)
+            DLSSNR_DIAG("consumer-entry", "kind={} cmd=0x{:X} pending={} active={} disabled(DI/DII/Dispatch)={}/{}/{}",
+                kind, (uintptr_t)commands, DLSSNRLatePass::Pending(), IsHudFixActive(),
+                Config::Instance()->FGHudfixDisableDI.value_or_default(), Config::Instance()->FGHudfixDisableDII.value_or_default(),
+                Config::Instance()->FGHudfixDisableDispatch.value_or_default());
+    }
+    const bool diagnose = DLSSNRLatePass::Enabled() && !DLSSNRCommandState::suppress;
+    if (diagnose) lateStats.consumers.fetch_add(1, std::memory_order_relaxed);
+    if (!DLSSNRLatePass::Pending() || !IsHudFixActive()) return;
+    if (diagnose) lateStats.activeConsumers.fetch_add(1, std::memory_order_relaxed);
+    if ((captureKind == CaptureInfo::DrawInstanced && Config::Instance()->FGHudfixDisableDI.value_or_default()) ||
+        (captureKind == CaptureInfo::DrawIndexedInstanced && Config::Instance()->FGHudfixDisableDII.value_or_default()) ||
+        (captureKind == CaptureInfo::Dispatch && Config::Instance()->FGHudfixDisableDispatch.value_or_default())) return;
+    const auto index = Hudfix_Dx12::ActivePresentFrame() % BUFFER_COUNT;
+    std::vector<ResourceInfo> inputs;
+    if (!_useShards)
+    {
+        std::lock_guard lock(_hudlessTrackMutex);
+        auto it = fgPossibleHudless[index].find(commands);
+        if (it != fgPossibleHudless[index].end())
+            for (const auto& [key, resource] : it->second)
+                if (resource.type == SRV) inputs.push_back(resource);
+    }
+    else
+    {
+        auto& shard = _hudlessShards[index][GetShardIndex(commands)];
+        std::lock_guard lock(shard.mutex);
+        auto it = shard.map.find(commands);
+        if (it != shard.map.end())
+            for (const auto& [key, resource] : it->second)
+                if (resource.type == SRV) inputs.push_back(resource);
+    }
+    if (diagnose)
+        DLSSNR_DIAG("consumer-inputs", "cmd=0x{:X} kind={} mapSlot={} SRVs={} shards={}",
+            (uintptr_t)commands, captureKind, index, inputs.size(), _useShards);
+    for (auto& resource : inputs)
+    {
+        resource.captureInfo |= captureKind;
+        if (Hudfix_Dx12::CheckForHudless(commands, &resource, resource.state)) break;
+    }
+}
+
 // Capture if render target matches, wait for DrawIndexed
 void ResTrack_Dx12::hkDrawInstanced(ID3D12GraphicsCommandList* This, UINT VertexCountPerInstance, UINT InstanceCount,
                                     UINT StartVertexLocation, UINT StartInstanceLocation)
 {
-    o_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+    CheckLateInputs(This, CaptureInfo::DrawInstanced);
+    if (!DLSSNRCommandState::suppress) DLSSNRPipelineTrace::Work(This);
+    CaptureDrawInstanced::Forward(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
 
     if (!IsHudFixActive())
     {
@@ -1525,6 +1754,7 @@ void ResTrack_Dx12::hkDrawInstanced(ID3D12GraphicsCommandList* This, UINT Vertex
             std::lock_guard<std::mutex> lock(_drawMutex);
             for (auto& [key, val] : val0)
             {
+                if (DLSSNRLatePass::Pending() && val.type == SRV) continue;
                 val.captureInfo |= CaptureInfo::DrawInstanced;
 
                 if (Hudfix_Dx12::CheckForHudless(This, &val, val.state))
@@ -1586,6 +1816,7 @@ void ResTrack_Dx12::hkDrawInstanced(ID3D12GraphicsCommandList* This, UINT Vertex
             {
                 std::lock_guard<std::mutex> lock(_drawMutex);
 
+                if (DLSSNRLatePass::Pending() && val.type == SRV) continue;
                 val.captureInfo |= CaptureInfo::DrawInstanced;
 
                 if (Hudfix_Dx12::CheckForHudless(This, &val, val.state))
@@ -1600,7 +1831,9 @@ void ResTrack_Dx12::hkDrawIndexedInstanced(ID3D12GraphicsCommandList* This, UINT
                                            UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation,
                                            UINT StartInstanceLocation)
 {
-    o_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
+    CheckLateInputs(This, CaptureInfo::DrawIndexedInstanced);
+    if (!DLSSNRCommandState::suppress) DLSSNRPipelineTrace::Work(This);
+    CaptureDrawIndexedInstanced::Forward(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation,
                            StartInstanceLocation);
 
     if (!IsHudFixActive())
@@ -1645,6 +1878,7 @@ void ResTrack_Dx12::hkDrawIndexedInstanced(ID3D12GraphicsCommandList* This, UINT
             std::lock_guard<std::mutex> lock(_drawMutex);
             for (auto& [key, val] : val0)
             {
+                if (DLSSNRLatePass::Pending() && val.type == SRV) continue;
                 val.captureInfo |= CaptureInfo::DrawIndexedInstanced;
 
                 if (Hudfix_Dx12::CheckForHudless(This, &val, val.state))
@@ -1707,6 +1941,7 @@ void ResTrack_Dx12::hkDrawIndexedInstanced(ID3D12GraphicsCommandList* This, UINT
                 // LOG_DEBUG("Waiting _drawMutex {:X}", (size_t)val.buffer);
                 std::lock_guard<std::mutex> lock(_drawMutex);
 
+                if (DLSSNRLatePass::Pending() && val.type == SRV) continue;
                 val.captureInfo |= CaptureInfo::DrawIndexedInstanced;
 
                 if (Hudfix_Dx12::CheckForHudless(This, &val, val.state))
@@ -1749,6 +1984,8 @@ void ResTrack_Dx12::hkExecuteBundle(ID3D12GraphicsCommandList* This, ID3D12Graph
         }
     }
 
+    if (Config::Instance()->DLSSNRLateHudless.value_or_default())
+        DLSSNRCommandState::Invalidate(This); // bundle-inherited bindings are not reconstructible here
     o_ExecuteBundle(This, pCommandList);
 }
 
@@ -1787,13 +2024,18 @@ HRESULT ResTrack_Dx12::hkClose(ID3D12GraphicsCommandList* This)
         }
     }
 
-    return o_Close(This);
+    DLSSNRCommandState::Reset(This);
+    const auto result = o_Close(This);
+    DLSSNRPipelineTrace::Mark("list-close", This, nullptr, static_cast<UINT>(result));
+    return result;
 }
 
 void ResTrack_Dx12::hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroupCountX, UINT ThreadGroupCountY,
                                UINT ThreadGroupCountZ)
 {
-    o_Dispatch(This, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+    CheckLateInputs(This, CaptureInfo::Dispatch);
+    if (!DLSSNRCommandState::suppress) DLSSNRPipelineTrace::Work(This);
+    CaptureDispatch::Forward(This, ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
 
     if (!IsHudFixActive())
     {
@@ -1837,6 +2079,7 @@ void ResTrack_Dx12::hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroup
             std::lock_guard<std::mutex> lock(_drawMutex);
             for (auto& [key, val] : val0)
             {
+                if (DLSSNRLatePass::Pending() && val.type == SRV) continue;
                 val.captureInfo |= CaptureInfo::Dispatch;
 
                 if (Hudfix_Dx12::CheckForHudless(This, &val, val.state))
@@ -1898,6 +2141,7 @@ void ResTrack_Dx12::hkDispatch(ID3D12GraphicsCommandList* This, UINT ThreadGroup
                 // LOG_DEBUG("Waiting _drawMutex {:X}", (size_t)val.buffer);
                 std::lock_guard<std::mutex> lock(_drawMutex);
 
+                if (DLSSNRLatePass::Pending() && val.type == SRV) continue;
                 val.captureInfo |= CaptureInfo::Dispatch;
                 if (Hudfix_Dx12::CheckForHudless(This, &val, val.state))
                 {
@@ -1952,6 +2196,67 @@ void ResTrack_Dx12::HookResource(ID3D12Device* InDevice)
     }
 }
 
+bool ResTrack_Dx12::ObserveCommandList(ID3D12GraphicsCommandList* commands)
+{
+    if (!commands || DLSSNRCommandState::suppress || State::Instance().isShuttingDown) return false;
+    DLSSNRPipelineSplit::Observe(commands);
+    bool ready = true;
+    auto table = *reinterpret_cast<void***>(commands);
+    {
+        bool added = false;
+        const auto result = CaptureDrawInstanced::Install(table[12], hkDrawInstanced, &added);
+        ready &= result == NO_ERROR;
+        if (result != NO_ERROR)
+            DLSSNR_DIAG("actual-hook-failed", "method discovery failed result={} cmd=0x{:X}", result, (uintptr_t)commands);
+        if (added)
+            LOG_INFO("[DLSSNR_DIAG][actual-hook] method=DrawInstanced target=[{}] result={} cmd=0x{:X}",
+                LateAddress(table[12]), result, (uintptr_t)commands);
+    }
+    {
+        bool added = false;
+        const auto result = CaptureDrawIndexedInstanced::Install(table[13], hkDrawIndexedInstanced, &added);
+        ready &= result == NO_ERROR;
+        if (result != NO_ERROR)
+            DLSSNR_DIAG("actual-hook-failed", "method discovery failed result={} cmd=0x{:X}", result, (uintptr_t)commands);
+        if (added)
+            LOG_INFO("[DLSSNR_DIAG][actual-hook] method=DrawIndexedInstanced target=[{}] result={} cmd=0x{:X}",
+                LateAddress(table[13]), result, (uintptr_t)commands);
+    }
+    {
+        bool added = false;
+        const auto result = CaptureDispatch::Install(table[14], hkDispatch, &added);
+        ready &= result == NO_ERROR;
+        if (result != NO_ERROR)
+            DLSSNR_DIAG("actual-hook-failed", "method discovery failed result={} cmd=0x{:X}", result, (uintptr_t)commands);
+        if (added)
+            LOG_INFO("[DLSSNR_DIAG][actual-hook] method=Dispatch target=[{}] result={} cmd=0x{:X}",
+                LateAddress(table[14]), result, (uintptr_t)commands);
+    }
+    {
+        bool added = false;
+        const auto result = CaptureSetComputeRootDescriptorTable::Install(table[31], hkSetComputeRootDescriptorTable, &added);
+        ready &= result == NO_ERROR;
+        if (result != NO_ERROR)
+            DLSSNR_DIAG("actual-hook-failed", "method discovery failed result={} cmd=0x{:X}", result, (uintptr_t)commands);
+        if (added)
+            LOG_INFO("[DLSSNR_DIAG][actual-hook] method=SetComputeRootDescriptorTable target=[{}] result={} cmd=0x{:X}",
+                LateAddress(table[31]), result, (uintptr_t)commands);
+    }
+    {
+        bool added = false;
+        const auto result = CaptureSetGraphicsRootDescriptorTable::Install(table[32], hkSetGraphicsRootDescriptorTable, &added);
+        ready &= result == NO_ERROR;
+        if (result != NO_ERROR)
+            DLSSNR_DIAG("actual-hook-failed", "method discovery failed result={} cmd=0x{:X}", result, (uintptr_t)commands);
+        if (added)
+            LOG_INFO("[DLSSNR_DIAG][actual-hook] method=SetGraphicsRootDescriptorTable target=[{}] result={} cmd=0x{:X}",
+                LateAddress(table[32]), result, (uintptr_t)commands);
+    }
+    ready &= D3D12Hooks::TrackLateCommandState(commands);
+    if (!ready) DLSSNRCommandState::Invalidate(commands);
+    return ready;
+}
+
 void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
 {
 
@@ -1973,6 +2278,12 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
             // Get the vtable pointer
             PVOID* pVTable = *(PVOID**) realCL;
 
+            for (unsigned i = 0; i < 7; ++i)
+            {
+                lateHookEntries[i].store((uintptr_t)pVTable[lateHookSlots[i]]);
+                LOG_INFO("[DLSSNR_DIAG][hook-target] method={} target=[{}] probeCmd=0x{:X}",
+                    lateHookNames[i], LateAddress(pVTable[lateHookSlots[i]]), (uintptr_t)realCL);
+            }
             // hudless shader
             o_OMSetRenderTargets = (PFN_OMSetRenderTargets) pVTable[46];
             o_SetGraphicsRootDescriptorTable = (PFN_SetGraphicsRootDescriptorTable) pVTable[32];
@@ -1980,47 +2291,73 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
             o_DrawInstanced = (PFN_DrawInstanced) pVTable[12];
             o_DrawIndexedInstanced = (PFN_DrawIndexedInstanced) pVTable[13];
             o_Dispatch = (PFN_Dispatch) pVTable[14];
+            o_LateExecuteIndirect = (LateExecuteIndirect)pVTable[59];
             o_Close = (PFN_Close) pVTable[9];
+            o_LateReset = (PFN_LateReset) pVTable[10];
+            Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> list4;
+            if (SUCCEEDED(realCL->QueryInterface(IID_PPV_ARGS(&list4))))
+            {
+                auto table4 = *reinterpret_cast<void***>(list4.Get());
+                o_LateBeginRenderPass = reinterpret_cast<PFN_LateBeginRenderPass>(table4[68]);
+                o_LateEndRenderPass = reinterpret_cast<PFN_LateEndRenderPass>(table4[69]);
+            }
 
             // hudless compute
             o_SetComputeRootDescriptorTable = (PFN_SetComputeRootDescriptorTable) pVTable[31];
 
             o_ExecuteBundle = (PFN_ExecuteBundle) pVTable[27];
 
+            ObserveCommandList(realCL);
             if (o_OMSetRenderTargets != nullptr)
             {
                 DetourTransactionBegin();
                 DetourUpdateThread(GetCurrentThread());
 
                 // Only needed for hudfix
-                if (State::Instance().activeFgInput == FGInput::Upscaler)
+                // Keep the existing capture hooks available for the runtime late-NR toggle.
                 {
                     if (o_OMSetRenderTargets != nullptr)
-                        DetourAttach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
+                    {
+                        const auto attachResult = DetourAttach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
+                        LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkOMSetRenderTargets result={}", attachResult);
+                    }
 
-                    if (o_SetGraphicsRootDescriptorTable != nullptr)
-                        DetourAttach(&(PVOID&) o_SetGraphicsRootDescriptorTable, hkSetGraphicsRootDescriptorTable);
-
-                    if (o_SetComputeRootDescriptorTable != nullptr)
-                        DetourAttach(&(PVOID&) o_SetComputeRootDescriptorTable, hkSetComputeRootDescriptorTable);
-
-                    if (o_DrawIndexedInstanced != nullptr)
-                        DetourAttach(&(PVOID&) o_DrawIndexedInstanced, hkDrawIndexedInstanced);
-
-                    if (o_DrawInstanced != nullptr)
-                        DetourAttach(&(PVOID&) o_DrawInstanced, hkDrawInstanced);
-
-                    if (o_Dispatch != nullptr)
-                        DetourAttach(&(PVOID&) o_Dispatch, hkDispatch);
                 }
 
+                if (o_LateExecuteIndirect)
+                {
+                    const auto attachResult = DetourAttach(&(PVOID&)o_LateExecuteIndirect, hkLateExecuteIndirect);
+                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=ExecuteIndirect result={}", attachResult);
+                }
+                if (o_LateReset)
+                {
+                    const auto attachResult = DetourAttach(&(PVOID&) o_LateReset, hkLateReset);
+                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkLateReset result={}", attachResult);
+                }
+                if (o_LateBeginRenderPass)
+                {
+                    const auto attachResult = DetourAttach(&(PVOID&) o_LateBeginRenderPass, hkLateBeginRenderPass);
+                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkLateBeginRenderPass result={}", attachResult);
+                }
+                if (o_LateEndRenderPass)
+                {
+                    const auto attachResult = DetourAttach(&(PVOID&) o_LateEndRenderPass, hkLateEndRenderPass);
+                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkLateEndRenderPass result={}", attachResult);
+                }
                 if (o_Close != nullptr)
-                    DetourAttach(&(PVOID&) o_Close, hkClose);
+                {
+                    const auto attachResult = DetourAttach(&(PVOID&) o_Close, hkClose);
+                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkClose result={}", attachResult);
+                }
 
                 if (o_ExecuteBundle != nullptr)
-                    DetourAttach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
+                {
+                    const auto attachResult = DetourAttach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
+                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkExecuteBundle result={}", attachResult);
+                }
 
                 auto detourResult = DetourTransactionCommit();
+                LOG_INFO("[DLSSNR_DIAG][hook-commit] result={}", detourResult);
                 if (detourResult != NO_ERROR)
                 {
                     LOG_ERROR("Failed to hook CommandList methods: {:X}", detourResult);
@@ -2029,7 +2366,11 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                     o_DrawInstanced = nullptr;
                     o_DrawIndexedInstanced = nullptr;
                     o_Dispatch = nullptr;
+                    o_LateExecuteIndirect = nullptr;
                     o_Close = nullptr;
+                    o_LateReset = nullptr;
+                    o_LateBeginRenderPass = nullptr;
+                    o_LateEndRenderPass = nullptr;
                     o_SetComputeRootDescriptorTable = nullptr;
                     o_ExecuteBundle = nullptr;
                 }
@@ -2093,9 +2434,37 @@ void ResTrack_Dx12::EnsureQueueHook(ID3D12Device* device)
     HookToQueue(device);
 }
 
+void ResTrack_Dx12::LogLateCaptureDiagnostics()
+{
+    auto read = [](const std::atomic<uint64_t>& value) { return value.load(std::memory_order_relaxed); };
+    LOG_WARN("[DLSSNR_DIAG][consumer-totals] DI/DII/Dispatch all={}/{}/{} pending={}/{}/{} suppressed={}/{}/{}",
+        read(lateStats.draws[0]), read(lateStats.draws[1]), read(lateStats.draws[2]),
+        read(lateStats.pendingDraws[0]), read(lateStats.pendingDraws[1]), read(lateStats.pendingDraws[2]),
+        read(lateStats.suppressedDraws[0]), read(lateStats.suppressedDraws[1]), read(lateStats.suppressedDraws[2]));
+    LOG_WARN("[DLSSNR_DIAG][indirect-totals] calls={} pending={} hook={}",
+        read(lateStats.indirect), read(lateStats.pendingIndirect), o_LateExecuteIndirect != nullptr);
+    auto& cfg = *Config::Instance();
+    const auto& desc = State::Instance().currentSwapchainDesc.BufferDesc;
+    LOG_WARN("[DLSSNR_CAPTURE] totals views(RTV/SRV/UAV)={}/{}/{} default={}/{}/{} stored={}/{}/{}; "
+        "OM calls={} active={} missingHeap={} missingView={} found={}; tables(G/C)={}/{} "
+        "drawDispatch={} active={} renderPass={}; swapchain={}x{} format={} "
+        "disabled(OM/SGR/SCR)={}/{}/{} hooks(device/OM/draw/dispatch)={}/{}/{}/{}",
+        read(lateStats.views[0]), read(lateStats.views[1]), read(lateStats.views[2]),
+        read(lateStats.defaults[0]), read(lateStats.defaults[1]), read(lateStats.defaults[2]),
+        read(lateStats.stored[0]), read(lateStats.stored[1]), read(lateStats.stored[2]),
+        read(lateStats.om), read(lateStats.omActive), read(lateStats.omMissingHeap),
+        read(lateStats.omMissingView), read(lateStats.omFound), read(lateStats.graphicsTables),
+        read(lateStats.computeTables), read(lateStats.consumers), read(lateStats.activeConsumers),
+        read(lateStats.renderPasses), desc.Width, desc.Height, (UINT)desc.Format,
+        cfg.FGHudfixDisableOM.value_or_default(), cfg.FGHudfixDisableSGR.value_or_default(),
+        cfg.FGHudfixDisableSCR.value_or_default(), o_CreateDescriptorHeap != nullptr,
+        o_OMSetRenderTargets != nullptr, o_DrawInstanced != nullptr, o_Dispatch != nullptr);
+}
+
 void ResTrack_Dx12::HookDevice(ID3D12Device* device)
 {
-    if (o_CreateDescriptorHeap != nullptr || State::Instance().activeFgInput == FGInput::NvngxFG)
+    if (o_CreateDescriptorHeap != nullptr ||
+        (State::Instance().activeFgInput == FGInput::NvngxFG && !DLSSNRLatePass::TrackDescriptors()))
         return;
 
     if (device == nullptr)
@@ -2170,11 +2539,32 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
     HookToQueue(device);
     HookCommandList(device);
     HookResource(device);
+    if (DLSSNRLatePass::TrackDescriptors())
+        LOG_INFO("[DLSSNR_LATE] descriptor tracking initialized before capture; FG-independent metadata tracking=1");
+}
+
+static void RemoveCaptureMethodHooks()
+{
+    D3D12Hooks::ReleaseLateCommandStateHooks();
+    if (const auto result = CaptureDrawInstanced::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove DrawInstanced entry hooks: {}", result);
+    if (const auto result = CaptureDrawIndexedInstanced::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove DrawIndexedInstanced entry hooks: {}", result);
+    if (const auto result = CaptureDispatch::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove Dispatch entry hooks: {}", result);
+    if (const auto result = CaptureSetComputeRootDescriptorTable::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove SetComputeRootDescriptorTable entry hooks: {}", result);
+    if (const auto result = CaptureSetGraphicsRootDescriptorTable::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove SetGraphicsRootDescriptorTable entry hooks: {}", result);
 }
 
 void ResTrack_Dx12::ReleaseDeviceHooks()
 {
     LOG_DEBUG("");
+
+    DLSSNRPipelineTrace::Shutdown();
+
+    RemoveCaptureMethodHooks();
 
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
@@ -2205,21 +2595,12 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
     if (o_OMSetRenderTargets != nullptr)
         DetourDetach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
 
-    if (o_SetGraphicsRootDescriptorTable != nullptr)
-        DetourDetach(&(PVOID&) o_SetGraphicsRootDescriptorTable, hkSetGraphicsRootDescriptorTable);
+    if (o_LateExecuteIndirect != nullptr)
+        DetourDetach(&(PVOID&)o_LateExecuteIndirect, hkLateExecuteIndirect);
 
-    if (o_SetComputeRootDescriptorTable != nullptr)
-        DetourDetach(&(PVOID&) o_SetComputeRootDescriptorTable, hkSetComputeRootDescriptorTable);
-
-    if (o_DrawIndexedInstanced != nullptr)
-        DetourDetach(&(PVOID&) o_DrawIndexedInstanced, hkDrawIndexedInstanced);
-
-    if (o_DrawInstanced != nullptr)
-        DetourDetach(&(PVOID&) o_DrawInstanced, hkDrawInstanced);
-
-    if (o_Dispatch != nullptr)
-        DetourDetach(&(PVOID&) o_Dispatch, hkDispatch);
-
+    if (o_LateReset) DetourDetach(&(PVOID&) o_LateReset, hkLateReset);
+    if (o_LateBeginRenderPass) DetourDetach(&(PVOID&) o_LateBeginRenderPass, hkLateBeginRenderPass);
+    if (o_LateEndRenderPass) DetourDetach(&(PVOID&) o_LateEndRenderPass, hkLateEndRenderPass);
     if (o_Close != nullptr)
         DetourDetach(&(PVOID&) o_Close, hkClose);
 
@@ -2255,7 +2636,11 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
         o_DrawIndexedInstanced = nullptr;
         o_DrawInstanced = nullptr;
         o_Dispatch = nullptr;
+        o_LateExecuteIndirect = nullptr;
         o_Close = nullptr;
+        o_LateReset = nullptr;
+        o_LateBeginRenderPass = nullptr;
+        o_LateEndRenderPass = nullptr;
         o_ExecuteBundle = nullptr;
 
         // Resource
@@ -2266,6 +2651,10 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
 void ResTrack_Dx12::ReleaseHooks()
 {
     LOG_DEBUG("");
+
+    DLSSNRPipelineTrace::Shutdown();
+
+    RemoveCaptureMethodHooks();
 
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
@@ -2308,21 +2697,12 @@ void ResTrack_Dx12::ReleaseHooks()
     if (o_OMSetRenderTargets != nullptr)
         DetourDetach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
 
-    if (o_SetGraphicsRootDescriptorTable != nullptr)
-        DetourDetach(&(PVOID&) o_SetGraphicsRootDescriptorTable, hkSetGraphicsRootDescriptorTable);
+    if (o_LateExecuteIndirect != nullptr)
+        DetourDetach(&(PVOID&)o_LateExecuteIndirect, hkLateExecuteIndirect);
 
-    if (o_SetComputeRootDescriptorTable != nullptr)
-        DetourDetach(&(PVOID&) o_SetComputeRootDescriptorTable, hkSetComputeRootDescriptorTable);
-
-    if (o_DrawIndexedInstanced != nullptr)
-        DetourDetach(&(PVOID&) o_DrawIndexedInstanced, hkDrawIndexedInstanced);
-
-    if (o_DrawInstanced != nullptr)
-        DetourDetach(&(PVOID&) o_DrawInstanced, hkDrawInstanced);
-
-    if (o_Dispatch != nullptr)
-        DetourDetach(&(PVOID&) o_Dispatch, hkDispatch);
-
+    if (o_LateReset) DetourDetach(&(PVOID&) o_LateReset, hkLateReset);
+    if (o_LateBeginRenderPass) DetourDetach(&(PVOID&) o_LateBeginRenderPass, hkLateBeginRenderPass);
+    if (o_LateEndRenderPass) DetourDetach(&(PVOID&) o_LateEndRenderPass, hkLateEndRenderPass);
     if (o_Close != nullptr)
         DetourDetach(&(PVOID&) o_Close, hkClose);
 
@@ -2342,7 +2722,11 @@ void ResTrack_Dx12::ReleaseHooks()
         o_DrawIndexedInstanced = nullptr;
         o_DrawInstanced = nullptr;
         o_Dispatch = nullptr;
+        o_LateExecuteIndirect = nullptr;
         o_Close = nullptr;
+        o_LateReset = nullptr;
+        o_LateBeginRenderPass = nullptr;
+        o_LateEndRenderPass = nullptr;
         o_ExecuteBundle = nullptr;
     }
 }

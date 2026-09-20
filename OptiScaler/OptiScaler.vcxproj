@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -250,9 +250,13 @@ move $(SolutionDir)x64\Release\$(TargetFileName) $(SolutionDir)x64\Release\a\
 md $(SolutionDir)x64\Release\a\Licenses
 del /Q $(SolutionDir)x64\Release\a\Licenses\*.*
 copy $(SolutionDir)external\xess\LICENSE.txt $(SolutionDir)x64\Release\a\Licenses\XeSS_LICENSE.txt /Y
+copy $(SolutionDir)Licenses\RenoDX_ATTRIBUTION.txt $(SolutionDir)x64\Release\a\Licenses\RenoDX_ATTRIBUTION.txt /Y
+copy "$(SolutionDir)Licenses\OptiScaler_DLSSNR_ATTRIBUTION.txt" "$(SolutionDir)x64\Release\a\Licenses\OptiScaler_DLSSNR_ATTRIBUTION.txt" /Y
+copy "$(SolutionDir)LICENSE" "$(SolutionDir)x64\Release\a\LICENSE" /Y
+copy "$(SolutionDir)CREDITS.md" "$(SolutionDir)x64\Release\a\CREDITS.md" /Y
 md $(SolutionDir)x64\Release\a\OptiScaler
 copy $(SolutionDir)external\xess\bin\*.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
-copy $(SolutionDir)external\FidelityFX-SDK\docs\license.md $(SolutionDir)x64\Release\a\OptiScaler\Licenses\FidelityFX_v1_LICENSE.md /Y
+copy $(SolutionDir)external\FidelityFX-SDK\docs\license.md $(SolutionDir)x64\Release\a\Licenses\FidelityFX_v1_LICENSE.md /Y
 copy $(SolutionDir)external\FidelityFX-SDK\PrebuiltSignedDLL\amd_fidelityfx_vk.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fidelityfx_loader_dx12.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fidelityfx_upscaler_dx12.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
@@ -499,6 +503,20 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="upscalers\dlss\DLSSFeature.h" />
     <ClInclude Include="upscalers\dlss\DLSSFeature_Dx11.h" />
     <ClInclude Include="upscalers\dlss\DLSSFeature_Dx12.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRFeature_Dx12.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRDiagnostics.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineTrace.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineSplit.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineAccess.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRNativeParameters.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRSegmentMethods.inl" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineCapture.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRPreview.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRLatePass.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRLateColor.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRCommandState.h" />
+    <ClInclude Include="upscalers\dlssnr\DLSSNRMethodHooks.h" />
+
     <ClInclude Include="upscalers\dlss\DLSSFeature_Vk.h" />
     <ClInclude Include="upscalers\FeatureProvider_Dx11.h" />
     <ClInclude Include="upscalers\FeatureProvider_Dx12.h" />
@@ -742,6 +760,14 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="upscalers\dlss\DLSSFeature.cpp" />
     <ClCompile Include="upscalers\dlss\DLSSFeature_Dx11.cpp" />
     <ClCompile Include="upscalers\dlss\DLSSFeature_Dx12.cpp" />
+    <ClCompile Include="upscalers\dlssnr\DLSSNRFeature_Dx12.cpp">
+      <AdditionalIncludeDirectories>$(IntDir)dlssnr-shaders;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="upscalers\dlssnr\DLSSNRPreview.cpp" />
+    <ClCompile Include="upscalers\dlssnr\DLSSNRLatePass.cpp" />
+    <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineTrace.cpp" />
+    <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineSplit.cpp" />
+    <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineAccess.cpp" />
     <ClCompile Include="upscalers\dlss\DLSSFeature_Vk.cpp" />
     <ClCompile Include="upscalers\FeatureProvider_Dx11.cpp" />
     <ClCompile Include="upscalers\FeatureProvider_Dx12.cpp" />
@@ -835,8 +861,14 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
   </ItemGroup>
   <ItemGroup>
     <None Include="Source.def" />
+    <None Include="upscalers\dlssnr\DLSSNRBoundary.hlsl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CompileDlssNrExtrapolationShaders" BeforeTargets="ClCompile"
+          Inputs="$(ProjectDir)upscalers\dlssnr\DLSSNRBoundary.hlsl;$(ProjectDir)..\tools\compile_dlssnr_extrapolation.ps1"
+          Outputs="$(IntDir)dlssnr-shaders\DLSSNRExtrapolationShaders.h">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)..\tools\compile_dlssnr_extrapolation.ps1&quot; -SourcePath &quot;$(ProjectDir)upscalers\dlssnr\DLSSNRBoundary.hlsl&quot; -OutputPath &quot;$(IntDir)dlssnr-shaders\DLSSNRExtrapolationShaders.h&quot;" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

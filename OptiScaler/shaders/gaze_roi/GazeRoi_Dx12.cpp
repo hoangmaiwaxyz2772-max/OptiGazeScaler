@@ -424,6 +424,56 @@ bool GazeRoiFrameSync::Acquire(ID3D12GraphicsCommandList* commandList, uint32_t&
     return true;
 }
 
+bool GazeRoiFrameSync::TryAcquire(ID3D12GraphicsCommandList* commandList, uint32_t& frameSlot)
+{
+    frameSlot = 0;
+    if (commandList == nullptr)
+        return false;
+
+    std::unique_lock lock(gazeRoiFrameSyncMutex);
+    ReclaimCompletedGazeRoiSlotsLocked();
+    const int slotIndex = FindFreeGazeRoiSlotLocked();
+    if (slotIndex < 0)
+    {
+        LOG_WARN("[GROI_SYNC] no reusable frame slot; skipping non-blocking lifetime tracking");
+        return false;
+    }
+
+    auto& slot = gazeRoiSlots[slotIndex];
+    slot.state = GazeRoiSlotState::Recording;
+    slot.commandList = commandList;
+    slot.fence.Reset();
+    slot.fenceValue = 0;
+    slot.generation = ++gazeRoiNextGeneration;
+    slot.timingActive = false;
+    slot.timingResolved = false;
+    slot.timestampFrequency = 0;
+    slot.timingKind = 0;
+    slot.timingPrimeIssued = false;
+    frameSlot = static_cast<uint32_t>(slotIndex);
+    auto readyCallbacks = CollectReadyGazeRoiCallbacksLocked();
+    LOG_DEBUG("[GROI_SYNC] try-acquire generation={} slot={} commandList={:X}", slot.generation, frameSlot,
+              reinterpret_cast<size_t>(commandList));
+    lock.unlock();
+    RunGazeRoiCallbacks(readyCallbacks);
+    return true;
+}
+
+void GazeRoiFrameSync::Cancel(uint32_t frameSlot, ID3D12GraphicsCommandList* commandList)
+{
+    if (frameSlot >= gazeRoiSlots.size())
+        return;
+    std::lock_guard lock(gazeRoiFrameSyncMutex);
+    auto& slot = gazeRoiSlots[frameSlot];
+    if (slot.state == GazeRoiSlotState::Recording && slot.commandList == commandList)
+    {
+        slot.state = GazeRoiSlotState::Free;
+        slot.commandList = nullptr;
+        slot.fence.Reset();
+        slot.fenceValue = 0;
+    }
+}
+
 void GazeRoiFrameSync::OnExecuteCommandLists(ID3D12CommandQueue* commandQueue, UINT numCommandLists,
                                               ID3D12CommandList* const* commandLists)
 {
@@ -531,13 +581,40 @@ void GazeRoiFrameSync::FlushDeferred()
     std::vector<std::function<void()>> callbacks;
     {
         std::lock_guard lock(gazeRoiFrameSyncMutex);
-        callbacks.reserve(gazeRoiDeferredCallbacks.size());
-        for (auto& deferred : gazeRoiDeferredCallbacks)
-            callbacks.push_back(std::move(deferred.callback));
-        gazeRoiDeferredCallbacks.clear();
+        // Teardown callers may run while the game still has submitted work.
+        // Reclaim only fence-completed generations; forcing every callback
+        // here can release NGX handles or D3D12 resources still referenced by
+        // the GPU and was the source of the reconfiguration hang class.
+        ReclaimCompletedGazeRoiSlotsLocked();
+        callbacks = CollectReadyGazeRoiCallbacksLocked();
     }
 
     RunGazeRoiCallbacks(callbacks);
+}
+
+bool GazeRoiFrameSync::WaitForSubmittedWork()
+{
+    ComPtr<ID3D12Fence> fence;
+    UINT64 value = 0;
+    {
+        std::lock_guard lock(gazeRoiFrameSyncMutex);
+        for (const auto& slot : gazeRoiSlots)
+            if (slot.state == GazeRoiSlotState::Submitted && slot.fence && slot.fenceValue)
+            { fence = slot.fence; value = slot.fenceValue; break; }
+    }
+    if (!fence || fence->GetCompletedValue() == UINT64_MAX) return false;
+    const HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (!event) return false;
+    const auto result = fence->SetEventOnCompletion(value, event);
+    const DWORD waited = SUCCEEDED(result) ? WaitForSingleObject(event, 5000) : WAIT_FAILED;
+    CloseHandle(event);
+    if (waited != WAIT_OBJECT_0 || fence->GetCompletedValue() == UINT64_MAX)
+    {
+        LOG_ERROR("[GROI_SYNC] async backpressure failed fence={} result=0x{:08X} wait={}", value, (UINT)result, waited);
+        return false;
+    }
+    FlushDeferred();
+    return true;
 }
 
 bool GazeRoiFrameSync::BeginGpuTiming(ID3D12Device* device, ID3D12GraphicsCommandList* commandList,
@@ -2615,19 +2692,37 @@ bool GazeRoiMvPatch_Dx12::CreatePatchedResource(ID3D12Device* device, ID3D12Reso
     if (device == nullptr || motionVectorTemplate == nullptr || width == 0 || height == 0)
         return false;
 
-    auto desc = motionVectorTemplate->GetDesc();
-    if (!IsSupportedMotionVectorFormat(desc.Format))
+    const auto sourceDesc = motionVectorTemplate->GetDesc();
+    if (sourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || sourceDesc.DepthOrArraySize != 1 ||
+        sourceDesc.MipLevels != 1 || sourceDesc.SampleDesc.Count != 1 ||
+        !IsSupportedMotionVectorFormat(sourceDesc.Format))
     {
-        LOG_WARN("[{}] Unsupported MV format for ROI patch: {}", _name, static_cast<uint32_t>(desc.Format));
+        LOG_WARN("[{}] Unsupported MV resource for ROI patch: dimension={} size={}x{} format={} flags=0x{:X} "
+                 "array={} mips={} samples={}",
+                 _name, static_cast<uint32_t>(sourceDesc.Dimension), sourceDesc.Width, sourceDesc.Height,
+                 static_cast<uint32_t>(sourceDesc.Format), static_cast<uint32_t>(sourceDesc.Flags),
+                 sourceDesc.DepthOrArraySize, sourceDesc.MipLevels, sourceDesc.SampleDesc.Count);
         return false;
     }
 
-    _motionVectorFormat = desc.Format;
+    _motionVectorFormat = sourceDesc.Format;
 
-    desc.Flags &= ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
-    desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+    // The game-owned MV may be a render-target or otherwise carry flags that
+    // are valid only for its original allocation. Reusing those flags on a
+    // differently sized committed resource can make D3D12 reject creation
+    // (notably when ALLOW_SIMULTANEOUS_ACCESS conflicts with RT/DS flags).
+    // The patch shader only needs SRV + UAV access, so use the minimal legal
+    // texture contract and a normal default GPU heap.
+    auto desc = sourceDesc;
+    desc.Alignment = 0;
     desc.Width = width;
     desc.Height = height;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
     if (_patchedMotionVectors != nullptr)
     {
@@ -2643,26 +2738,22 @@ bool GazeRoiMvPatch_Dx12::CreatePatchedResource(ID3D12Device* device, ID3D12Reso
         std::fill(std::begin(_slotPatchedMotionVectors), std::end(_slotPatchedMotionVectors), nullptr);
     }
 
-    D3D12_HEAP_PROPERTIES heapProperties {};
-    D3D12_HEAP_FLAGS heapFlags {};
-    HRESULT hr = motionVectorTemplate->GetHeapProperties(&heapProperties, &heapFlags);
+    const auto heapProperties = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    const HRESULT hr = device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, initialState,
+                                                        nullptr, IID_PPV_ARGS(&_patchedMotionVectors));
     if (FAILED(hr))
     {
-        LOG_ERROR("[{}] GetHeapProperties result: {:X}", _name, (UINT64)hr);
-        return false;
-    }
-
-    hr = device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &desc, initialState, nullptr,
-                                         IID_PPV_ARGS(&_patchedMotionVectors));
-    if (FAILED(hr))
-    {
-        LOG_ERROR("[{}] CreateCommittedResource result: {:X}", _name, (UINT64)hr);
+        LOG_ERROR("[{}] CreateCommittedResource result: {:X} sourceFlags=0x{:X} patchFlags=0x{:X} format={}",
+                  _name, (UINT64)hr, static_cast<uint32_t>(sourceDesc.Flags), static_cast<uint32_t>(desc.Flags),
+                  static_cast<uint32_t>(desc.Format));
         return false;
     }
 
     _patchedMotionVectors->SetName(L"GazeRoi_Patched_MotionVectors");
     _patchedMotionVectorsState = initialState;
-    LOG_INFO("[{}] Created patched MV resource: {}x{}", _name, desc.Width, desc.Height);
+    LOG_INFO("[{}] Created patched MV resource: {}x{} format={} sourceFlags=0x{:X} patchFlags=0x{:X}", _name,
+             desc.Width, desc.Height, static_cast<uint32_t>(desc.Format), static_cast<uint32_t>(sourceDesc.Flags),
+             static_cast<uint32_t>(desc.Flags));
     return true;
 }
 
