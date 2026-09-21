@@ -558,9 +558,11 @@ struct Creation<Slot, Member, HRESULT(STDMETHODCALLTYPE Object::*)(Args...)>
                 const bool stored = Attach(heap.Get(), identity);
                 if (stored) identities[heap.Get()] = identity;
                 static UINT64 creations = 0;
+                // Template function names may contain braces on MSVC; pass
+                // the name as data rather than part of the format string.
                 if (++creations <= 3 || !stored)
-                    LOG_INFO("[DLSSNR_ACCESS_HEAP] slot={} heap=0x{:X} id={} bytes={} tracked={}",
-                        Slot, uintptr_t(heap.Get()), identity->id, heap->GetDesc().SizeInBytes, stored);
+                    spdlog::info("{} [DLSSNR_ACCESS_HEAP] slot={} heap=0x{:X} id={} bytes={} tracked={}",
+                        __FUNCTION__, Slot, uintptr_t(heap.Get()), identity->id, heap->GetDesc().SizeInBytes, stored);
             }
         }
         else if constexpr (Slot == 14)

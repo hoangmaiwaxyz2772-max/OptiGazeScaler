@@ -341,8 +341,10 @@ struct Route<Slot, P, Member, void(STDMETHODCALLTYPE Object::*)(Args...)>
     static bool Install(void* address)
     {
         const auto result = Hook::Install(address, Call);
+        // MSVC may include braces in this instantiated function name. Keep it
+        // out of the compile-time format string used by the logging macro.
         if (result != NO_ERROR)
-            LOG_WARN("[DLSSNR_SPLIT] method install failed slot={} result={}", Slot, result);
+            spdlog::warn("{} [DLSSNR_SPLIT] method install failed slot={} result={}", __FUNCTION__, Slot, result);
         return result == NO_ERROR;
     }
 };
