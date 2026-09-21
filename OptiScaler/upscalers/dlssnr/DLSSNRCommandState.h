@@ -1,6 +1,7 @@
 #pragma once
 #include <d3d12.h>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <map>
 #include <mutex>
@@ -12,6 +13,17 @@
 // both bind points must be restored, including partially updated root constants.
 namespace DLSSNRCommandState
 {
+// A toggle during recording leaves a gap in the observed bindings. Reject
+// that recording until the next successful creation/Reset, without taking the
+// state mutex on every binding while the model is disabled.
+inline std::atomic<uint64_t> captureEpoch {0};
+inline bool CaptureEnabled(bool enabled)
+{
+    auto epoch = captureEpoch.load(std::memory_order_relaxed);
+    while (bool(epoch & 1) != enabled &&
+           !captureEpoch.compare_exchange_weak(epoch, epoch + 1, std::memory_order_relaxed)) {}
+    return enabled;
+}
 inline thread_local unsigned suppress = 0;
 struct Suppress
 {
@@ -66,6 +78,7 @@ struct State
     bool renderPass = false;
     bool invalid = false;
     bool recordingKnown = false;
+    uint64_t epoch = 0;
     BindPoint compute, graphics;
     void Restore(ID3D12GraphicsCommandList* list) const
     {
@@ -114,7 +127,13 @@ inline void Reset(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pipeline
     if (suppress) return;
     std::lock_guard lock(mutex);
     states.erase(list);
-    if (start) { states[list].pipeline = pipeline; states[list].recordingKnown = true; }
+    if (start)
+    {
+        auto& state = states[list];
+        state.pipeline = pipeline;
+        state.recordingKnown = true;
+        state.epoch = captureEpoch.load(std::memory_order_relaxed);
+    }
 }
 inline void Pipeline(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pipeline)
 {
@@ -176,6 +195,7 @@ inline std::optional<State> Snapshot(ID3D12GraphicsCommandList* list, const char
     auto it = states.find(list);
     const char* failure = it == states.end() ? "command-list-untracked" :
         it->second.invalid ? "invalid-or-bundle" : !it->second.recordingKnown ? "reset-not-observed" :
+        it->second.epoch != captureEpoch.load(std::memory_order_relaxed) ? "capture-toggled-during-recording" :
         it->second.renderPass ? "inside-render-pass" : !it->second.pipeline ? "pipeline-unknown" :
         !it->second.heapsKnown ? "descriptor-heaps-unknown" :
         (!it->second.compute.signature && !it->second.graphics.signature) ? "root-signatures-unknown" : nullptr;

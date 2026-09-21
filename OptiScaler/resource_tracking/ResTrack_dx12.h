@@ -8,6 +8,7 @@
 #include <ankerl/unordered_dense.h>
 
 #include <new>
+#include <climits>
 #include <mutex>
 #include <atomic>
 #include <shared_mutex>
@@ -120,12 +121,49 @@ struct SpinLock
 #endif
 #endif
 
-static ankerl::unordered_dense::map<ID3D12Resource*, std::vector<ResourceInfo*>> _trackedResources;
+// Keep membership outside ResourceInfo: copying a descriptor copies its view
+// metadata, never its position in the reverse-reference index.
+constexpr UINT INVALID_RESOURCE_REFERENCE = UINT_MAX;
+struct ResourceReference
+{
+    ResourceInfo* info;
+    UINT* position;
+};
+struct alignas(CACHE_LINE_SIZE) ResourceReferenceShard
+{
 #ifdef USE_SPINLOCK_MUTEX
-static SpinLock _trackedResourcesMutex;
+    SpinLock mutex;
 #else
-static std::mutex _trackedResourcesMutex;
+    std::mutex mutex;
 #endif
+    ankerl::unordered_dense::map<ID3D12Resource*, std::vector<ResourceReference>> resources;
+    // Caller holds mutex. Invalidation and removal from the index must happen
+    // together so a heap cannot free/reuse a slot before it is cleared.
+    bool Invalidate(ID3D12Resource* resource)
+    {
+        auto it = resources.find(resource);
+        if (it == resources.end())
+            return false;
+        for (auto& ref : it->second)
+        {
+            ref.info->buffer = nullptr;
+            ref.info->lastUsedFrame = 0;
+            *ref.position = INVALID_RESOURCE_REFERENCE;
+        }
+        resources.erase(it);
+        return true;
+    }
+};
+inline ResourceReferenceShard _resourceReferenceShards[64];
+inline ResourceReferenceShard& ResourceReferences(ID3D12Resource* resource)
+{
+    // Mix away pointer alignment; aligned resource addresses must not all use
+    // the same shard. A resource and all its descriptor copies share one lock.
+    auto key = reinterpret_cast<uintptr_t>(resource) >> 4;
+    key ^= key >> 17;
+    key *= UINT64_C(0x9e3779b97f4a7c15);
+    return _resourceReferenceShards[key >> 58];
+}
 
 struct HeapInfo
 {
@@ -140,6 +178,7 @@ struct HeapInfo
     UINT increment = 0;
     UINT type = 0;
     std::shared_ptr<ResourceInfo[]> info;
+    std::unique_ptr<UINT[]> referencePositions;
     UINT lastOffset = 0;
     bool active = true;
     std::atomic<uint64_t> version { 0 };
@@ -147,7 +186,8 @@ struct HeapInfo
     HeapInfo(ID3D12DescriptorHeap* heap, SIZE_T cpuStart, SIZE_T cpuEnd, SIZE_T gpuStart, SIZE_T gpuEnd,
              UINT numResources, UINT increment, UINT type)
         : heap(heap), cpuStart(cpuStart), cpuEnd(cpuEnd), gpuStart(gpuStart), gpuEnd(gpuEnd),
-          numDescriptors(numResources), increment(increment), type(type), info(new ResourceInfo[numResources])
+          numDescriptors(numResources), increment(increment), type(type), info(new ResourceInfo[numResources]),
+          referencePositions(new UINT[numResources])
     {
         static std::atomic<uint64_t> globalHeapVersion { 1 };
         version.store(globalHeapVersion.fetch_add(1, std::memory_order_relaxed), std::memory_order_relaxed);
@@ -155,35 +195,51 @@ struct HeapInfo
         for (size_t i = 0; i < numDescriptors; i++)
         {
             info[i].buffer = nullptr;
+            referencePositions[i] = INVALID_RESOURCE_REFERENCE;
         }
     }
 
     void DetachFromOldResource(SIZE_T index) const
     {
-        if (info[index].buffer == nullptr)
+        auto* resource = info[index].buffer;
+        if (resource == nullptr)
             return;
 
-        std::scoped_lock lock(_trackedResourcesMutex);
+        auto& shard = ResourceReferences(resource);
+        std::scoped_lock lock(shard.mutex);
         LOG_TRACK("Heap: {:X}, Index: {}, Resource: {:X}, Res: {}x{}, Format: {}", (size_t) this, index,
                   (size_t) info[index].buffer, info[index].width, info[index].height, (UINT) info[index].format);
-        auto it = _trackedResources.find(info[index].buffer);
-        if (it != _trackedResources.end())
+        auto it = shard.resources.find(resource);
+        if (it != shard.resources.end() && referencePositions[index] != INVALID_RESOURCE_REFERENCE)
         {
             auto& vec = it->second;
-            vec.erase(std::remove(vec.begin(), vec.end(), &info[index]), vec.end());
+            const auto position = referencePositions[index];
+            // Swap-and-pop preserves every remaining descriptor's membership
+            // without scanning a resource's (potentially thousands of) copies.
+            vec[position] = vec.back();
+            *vec[position].position = position;
+            vec.pop_back();
             if (vec.empty())
-                _trackedResources.erase(it);
+                shard.resources.erase(it);
         }
+        referencePositions[index] = INVALID_RESOURCE_REFERENCE;
     }
 
     void AttachToNewResource(SIZE_T index) const
     {
-        std::scoped_lock lock(_trackedResourcesMutex);
+        if (info[index].buffer == nullptr)
+            return;
+        auto& shard = ResourceReferences(info[index].buffer);
+        std::scoped_lock lock(shard.mutex);
         LOG_TRACK("Heap: {:X}, Index: {}, Resource: {:X}, Res: {}x{}, Format: {}", (size_t) this, index,
                   (size_t) info[index].buffer, info[index].width, info[index].height, (UINT) info[index].format);
-        auto& vec = _trackedResources[info[index].buffer];
-        if (std::find(vec.begin(), vec.end(), &info[index]) == vec.end())
-            vec.push_back(&info[index]);
+        auto& vec = shard.resources[info[index].buffer];
+        if (referencePositions[index] == INVALID_RESOURCE_REFERENCE)
+        {
+            const auto position = static_cast<UINT>(vec.size());
+            vec.push_back({ &info[index], &referencePositions[index] });
+            referencePositions[index] = position;
+        }
     }
 
     ResourceInfo* GetByCpuHandle(SIZE_T cpuHandle) const

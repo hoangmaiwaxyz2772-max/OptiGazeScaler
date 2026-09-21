@@ -214,9 +214,12 @@ void PrepareLogger()
             }
 
             shared_logger->set_level((spdlog::level::level_enum) Config::Instance()->LogLevel.value_or_default());
-            shared_logger->flush_on(spdlog::level::trace);
+            // Trace logging runs on the render/input paths. Flushing every
+            // message serializes those threads on file I/O.
+            shared_logger->flush_on(spdlog::level::warn);
 
             spdlog::set_default_logger(shared_logger);
+            spdlog::flush_every(std::chrono::seconds(1));
             spdlog::info("Logger initialized. Log file: {}",
                          wstring_to_string(Config::Instance()->LogFileName.value_or_default()));
         }

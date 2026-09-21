@@ -146,7 +146,6 @@ void LogInputHealthSnapshotLocked(const char* origin)
     static bool lastExternalVirtualMouseAuthoritative = false;
     static bool lastExternalLowLevelMouseHookInstalled = false;
     static bool lastExternalRawInputSinkRegistered = false;
-    static InputAcquisitionMode lastAcquisitionMode = InputAcquisitionMode::None;
     static DWORD lastTargetProcessId = 0;
     static DWORD lastInputProcessId = 0;
     static std::uint64_t lastNoInputWarnFrame = 0;
@@ -164,6 +163,8 @@ void LogInputHealthSnapshotLocked(const char* origin)
 
     RefreshInputAcquisitionModeLocked();
 
+    // Raw events and absolute polling normally alternate. Sample their mode
+    // with the periodic snapshot instead of treating every event as a fault.
     const bool stateChanged =
         lastTargetHwnd != _state.TargetHwnd || lastInputHwnd != _state.InputHwnd ||
         lastForegroundHwnd != foregroundHwnd || lastFocused != _state.Focused ||
@@ -174,7 +175,7 @@ void LogInputHealthSnapshotLocked(const char* origin)
         lastExternalVirtualMouseAuthoritative != _state.ExternalVirtualMouseAuthoritative ||
         lastExternalLowLevelMouseHookInstalled != _state.ExternalLowLevelMouseHookInstalled ||
         lastExternalRawInputSinkRegistered != _state.ExternalRawInputSinkRegistered ||
-        lastAcquisitionMode != _state.AcquisitionMode || lastTargetProcessId != _state.TargetProcessId ||
+        lastTargetProcessId != _state.TargetProcessId ||
         lastInputProcessId != _state.InputProcessId;
 
 #if OPTIINPUT_VERBOSE_LOGGING

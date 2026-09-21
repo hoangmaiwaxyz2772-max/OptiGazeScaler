@@ -221,112 +221,112 @@ namespace
 using LateStateSetPipelineState = DLSSNRMethodHooks::MethodHook<125, PFN_SetPipelineState>;
 static void TrackSetPipelineState(ID3D12GraphicsCommandList* commands, ID3D12PipelineState* value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Pipeline(commands, value);
     LateStateSetPipelineState::Forward(commands, value);
 }
 using LateStateSetDescriptorHeaps = DLSSNRMethodHooks::MethodHook<128, PFN_SetDescriptorHeaps>;
 static void TrackSetDescriptorHeaps(ID3D12GraphicsCommandList* commands, UINT count, ID3D12DescriptorHeap* const* heaps)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Heaps(commands, count, heaps);
     LateStateSetDescriptorHeaps::Forward(commands, count, heaps);
 }
 using LateStateSetComputeRootSignature = DLSSNRMethodHooks::MethodHook<129, PFN_SetComputeRootSignature>;
 static void TrackSetComputeRootSignature(ID3D12GraphicsCommandList* commands, ID3D12RootSignature* value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Signature(commands, true, value);
     LateStateSetComputeRootSignature::Forward(commands, value);
 }
 using LateStateSetComputeRootDescriptorTable = DLSSNRMethodHooks::MethodHook<131, PFN_SetComputeRootDescriptorTable>;
 static void TrackSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_DESCRIPTOR_HANDLE value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::Table, value.ptr);
     LateStateSetComputeRootDescriptorTable::Forward(commands, index, value);
 }
 using LateStateSetComputeRoot32BitConstant = DLSSNRMethodHooks::MethodHook<133, PFN_SetComputeRoot32BitConstant>;
 static void TrackSetComputeRoot32BitConstant(ID3D12GraphicsCommandList* commands, UINT index, UINT value, UINT offset)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Constants(commands, true, index, 1, &value, offset);
     LateStateSetComputeRoot32BitConstant::Forward(commands, index, value, offset);
 }
 using LateStateSetComputeRoot32BitConstants = DLSSNRMethodHooks::MethodHook<135, PFN_SetComputeRoot32BitConstants>;
 static void TrackSetComputeRoot32BitConstants(ID3D12GraphicsCommandList* commands, UINT index, UINT count, const void* values, UINT offset)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Constants(commands, true, index, count, values, offset);
     LateStateSetComputeRoot32BitConstants::Forward(commands, index, count, values, offset);
 }
 using LateStateSetComputeRootConstantBufferView = DLSSNRMethodHooks::MethodHook<137, PFN_SetComputeRootConstantBufferView>;
 static void TrackSetComputeRootConstantBufferView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::CBV, value);
     LateStateSetComputeRootConstantBufferView::Forward(commands, index, value);
 }
 using LateStateSetComputeRootShaderResourceView = DLSSNRMethodHooks::MethodHook<139, PFN_SetComputeRootShaderResourceView>;
 static void TrackSetComputeRootShaderResourceView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::SRV, value);
     LateStateSetComputeRootShaderResourceView::Forward(commands, index, value);
 }
 using LateStateSetComputeRootUnorderedAccessView = DLSSNRMethodHooks::MethodHook<141, PFN_SetComputeRootUnorderedAccessView>;
 static void TrackSetComputeRootUnorderedAccessView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::UAV, value);
     LateStateSetComputeRootUnorderedAccessView::Forward(commands, index, value);
 }
 using LateStateSetGraphicsRootSignature = DLSSNRMethodHooks::MethodHook<130, PFN_SetGraphicsRootSignature>;
 static void TrackSetGraphicsRootSignature(ID3D12GraphicsCommandList* commands, ID3D12RootSignature* value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Signature(commands, false, value);
     LateStateSetGraphicsRootSignature::Forward(commands, value);
 }
 using LateStateSetGraphicsRootDescriptorTable = DLSSNRMethodHooks::MethodHook<132, PFN_SetGraphicsRootDescriptorTable>;
 static void TrackSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_DESCRIPTOR_HANDLE value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::Table, value.ptr);
     LateStateSetGraphicsRootDescriptorTable::Forward(commands, index, value);
 }
 using LateStateSetGraphicsRoot32BitConstant = DLSSNRMethodHooks::MethodHook<134, PFN_SetGraphicsRoot32BitConstant>;
 static void TrackSetGraphicsRoot32BitConstant(ID3D12GraphicsCommandList* commands, UINT index, UINT value, UINT offset)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Constants(commands, false, index, 1, &value, offset);
     LateStateSetGraphicsRoot32BitConstant::Forward(commands, index, value, offset);
 }
 using LateStateSetGraphicsRoot32BitConstants = DLSSNRMethodHooks::MethodHook<136, PFN_SetGraphicsRoot32BitConstants>;
 static void TrackSetGraphicsRoot32BitConstants(ID3D12GraphicsCommandList* commands, UINT index, UINT count, const void* values, UINT offset)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Constants(commands, false, index, count, values, offset);
     LateStateSetGraphicsRoot32BitConstants::Forward(commands, index, count, values, offset);
 }
 using LateStateSetGraphicsRootConstantBufferView = DLSSNRMethodHooks::MethodHook<138, PFN_SetGraphicsRootConstantBufferView>;
 static void TrackSetGraphicsRootConstantBufferView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::CBV, value);
     LateStateSetGraphicsRootConstantBufferView::Forward(commands, index, value);
 }
 using LateStateSetGraphicsRootShaderResourceView = DLSSNRMethodHooks::MethodHook<140, PFN_SetGraphicsRootShaderResourceView>;
 static void TrackSetGraphicsRootShaderResourceView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::SRV, value);
     LateStateSetGraphicsRootShaderResourceView::Forward(commands, index, value);
 }
 using LateStateSetGraphicsRootUnorderedAccessView = DLSSNRMethodHooks::MethodHook<142, PFN_SetGraphicsRootUnorderedAccessView>;
 static void TrackSetGraphicsRootUnorderedAccessView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
+    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
         DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::UAV, value);
     LateStateSetGraphicsRootUnorderedAccessView::Forward(commands, index, value);
 }
@@ -405,7 +405,6 @@ void D3D12Hooks::ReleaseLateCommandStateHooks()
     if (const auto result = LateStateSetGraphicsRootUnorderedAccessView::Remove(); result != NO_ERROR)
         LOG_ERROR("Failed to remove late-state SetGraphicsRootUnorderedAccessView hooks: {}", result);
 }
-
 
 // Intel Atomic Extension
 struct UE_D3D12_RESOURCE_DESC
@@ -578,9 +577,6 @@ static void ApplySamplerOverrides(D3D12_STATIC_SAMPLER_DESC1& samplerDesc)
 VALIDATE_HOOK(hkSetPipelineState, PFN_SetPipelineState)
 static void hkSetPipelineState(ID3D12GraphicsCommandList* commandList, ID3D12PipelineState* pPipelineState)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Pipeline(commandList, pPipelineState);
-
     if (!lateInProgressSetPipelineState && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && pPipelineState != nullptr)
     {
         std::unique_lock<std::shared_mutex> lock(pipelineStatesMutex);
@@ -594,9 +590,6 @@ VALIDATE_HOOK(hkSetDescriptorHeaps, PFN_SetDescriptorHeaps)
 static void hkSetDescriptorHeaps(ID3D12GraphicsCommandList* commandList, UINT NumDescriptorHeaps,
                                  ID3D12DescriptorHeap* const* ppDescriptorHeaps)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Heaps(commandList, NumDescriptorHeaps, ppDescriptorHeaps);
-
     if (!lateInProgressSetDescriptorHeaps && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr &&
         ppDescriptorHeaps != nullptr)
     {
@@ -623,9 +616,6 @@ UINT GetRootParameterCount(ID3D12RootSignature* pRootSignature)
 VALIDATE_HOOK(hkSetComputeRootSignature, PFN_SetComputeRootSignature)
 static void hkSetComputeRootSignature(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* pRootSignature)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Signature(commandList, true, pRootSignature);
-
     if (!lateInProgressSetComputeRootSignature && Config::Instance()->RestoreComputeSignature.value_or_default() &&
         !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && pRootSignature != nullptr)
     {
@@ -647,9 +637,6 @@ VALIDATE_HOOK(hkSetComputeRootDescriptorTable, PFN_SetComputeRootDescriptorTable
 static void hkSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                             D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, true, RootParameterIndex, DLSSNRCommandState::Kind::Table, BaseDescriptor.ptr);
-
     if (!lateInProgressSetComputeRootDescriptorTable && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr &&
         BaseDescriptor.ptr)
     {
@@ -669,9 +656,6 @@ VALIDATE_HOOK(hkSetComputeRoot32BitConstants, PFN_SetComputeRoot32BitConstants)
 static void hkSetComputeRoot32BitConstants(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                            UINT Num32BitValuesToSet, const void* pSrcData, UINT DestOffsetIn32BitValues)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commandList, true, RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
-
     if (!lateInProgressSetComputeRoot32BitConstants && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && pSrcData)
     {
         std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
@@ -694,9 +678,6 @@ VALIDATE_HOOK(hkSetComputeRoot32BitConstant, PFN_SetComputeRoot32BitConstant)
 static void hkSetComputeRoot32BitConstant(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex, UINT SrcData,
                                           UINT DestOffsetIn32BitValues)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commandList, true, RootParameterIndex, 1, &SrcData, DestOffsetIn32BitValues);
-
     if (!lateInProgressSetComputeRoot32BitConstant && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
     {
         std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
@@ -716,9 +697,6 @@ VALIDATE_HOOK(hkSetComputeRootConstantBufferView, PFN_SetComputeRootConstantBuff
 static void hkSetComputeRootConstantBufferView(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, true, RootParameterIndex, DLSSNRCommandState::Kind::CBV, BufferLocation);
-
     if (!lateInProgressSetComputeRootConstantBufferView && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
     {
         std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
@@ -737,9 +715,6 @@ VALIDATE_HOOK(hkSetComputeRootShaderResourceView, PFN_SetComputeRootShaderResour
 static void hkSetComputeRootShaderResourceView(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, true, RootParameterIndex, DLSSNRCommandState::Kind::SRV, BufferLocation);
-
     if (!lateInProgressSetComputeRootShaderResourceView && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
     {
         std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
@@ -760,9 +735,6 @@ VALIDATE_HOOK(hkSetComputeRootUnorderedAccessView, PFN_SetComputeRootUnorderedAc
 static void hkSetComputeRootUnorderedAccessView(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                 D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, true, RootParameterIndex, DLSSNRCommandState::Kind::UAV, BufferLocation);
-
     if (lateInProgressSetComputeRootUnorderedAccessView && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
     {
         std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
@@ -780,9 +752,6 @@ static void hkSetComputeRootUnorderedAccessView(ID3D12GraphicsCommandList* comma
 VALIDATE_HOOK(hkSetGraphicsRootSignature, PFN_SetGraphicsRootSignature)
 static void hkSetGraphicsRootSignature(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* pRootSignature)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Signature(commandList, false, pRootSignature);
-
     if (!lateInProgressSetGraphicsRootSignature && Config::Instance()->RestoreGraphicSignature.value_or_default() &&
         !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && pRootSignature != nullptr)
     {
@@ -797,9 +766,6 @@ VALIDATE_HOOK(hkSetGraphicsRootDescriptorTable, PFN_SetGraphicsRootDescriptorTab
 static void hkSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                              D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, false, RootParameterIndex, DLSSNRCommandState::Kind::Table, BaseDescriptor.ptr);
-
     if (!lateInProgressSetGraphicsRootDescriptorTable && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr &&
         BaseDescriptor.ptr)
     {
@@ -820,9 +786,6 @@ static void hkSetGraphicsRoot32BitConstants(ID3D12GraphicsCommandList* commandLi
                                             UINT Num32BitValuesToSet, const void* pSrcData,
                                             UINT DestOffsetIn32BitValues)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commandList, false, RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
-
     if (!lateInProgressSetGraphicsRoot32BitConstants && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && pSrcData)
     {
         std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
@@ -845,9 +808,6 @@ VALIDATE_HOOK(hkSetGraphicsRoot32BitConstant, PFN_SetGraphicsRoot32BitConstant)
 static void hkSetGraphicsRoot32BitConstant(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                            UINT SrcData, UINT DestOffsetIn32BitValues)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commandList, false, RootParameterIndex, 1, &SrcData, DestOffsetIn32BitValues);
-
     if (!lateInProgressSetGraphicsRoot32BitConstant && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
     {
         std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
@@ -867,9 +827,6 @@ VALIDATE_HOOK(hkSetGraphicsRootConstantBufferView, PFN_SetGraphicsRootConstantBu
 static void hkSetGraphicsRootConstantBufferView(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                 D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, false, RootParameterIndex, DLSSNRCommandState::Kind::CBV, BufferLocation);
-
     if (!lateInProgressSetGraphicsRootConstantBufferView && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
     {
         std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
@@ -888,9 +845,6 @@ VALIDATE_HOOK(hkSetGraphicsRootShaderResourceView, PFN_SetGraphicsRootShaderReso
 static void hkSetGraphicsRootShaderResourceView(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                 D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, false, RootParameterIndex, DLSSNRCommandState::Kind::SRV, BufferLocation);
-
     if (!lateInProgressSetGraphicsRootShaderResourceView && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
     {
         std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
@@ -911,9 +865,6 @@ VALIDATE_HOOK(hkSetGraphicsRootUnorderedAccessView, PFN_SetGraphicsRootUnordered
 static void hkSetGraphicsRootUnorderedAccessView(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                  D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, false, RootParameterIndex, DLSSNRCommandState::Kind::UAV, BufferLocation);
-
     if (lateInProgressSetGraphicsRootUnorderedAccessView && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
     {
         std::unique_lock<std::shared_mutex> lock(rootStatesMutex);
@@ -932,9 +883,6 @@ static void hkSetGraphicsRootUnorderedAccessView(ID3D12GraphicsCommandList* comm
 VALIDATE_HOOK(hkSetPipelineStateLate, PFN_SetPipelineState)
 static void hkSetPipelineStateLate(ID3D12GraphicsCommandList* commandList, ID3D12PipelineState* pPipelineState)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Pipeline(commandList, pPipelineState);
-
     lateInProgressSetPipelineState = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && pPipelineState != nullptr)
@@ -952,9 +900,6 @@ VALIDATE_HOOK(hkSetDescriptorHeapsLate, PFN_SetDescriptorHeaps)
 static void hkSetDescriptorHeapsLate(ID3D12GraphicsCommandList* commandList, UINT NumDescriptorHeaps,
                                      ID3D12DescriptorHeap* const* ppDescriptorHeaps)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Heaps(commandList, NumDescriptorHeaps, ppDescriptorHeaps);
-
     lateInProgressSetDescriptorHeaps = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && ppDescriptorHeaps != nullptr)
@@ -977,9 +922,6 @@ static void hkSetDescriptorHeapsLate(ID3D12GraphicsCommandList* commandList, UIN
 VALIDATE_HOOK(hkSetComputeRootSignatureLate, PFN_SetComputeRootSignature)
 static void hkSetComputeRootSignatureLate(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* pRootSignature)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Signature(commandList, true, pRootSignature);
-
     lateInProgressSetComputeRootSignature = true;
 
     if (Config::Instance()->RestoreComputeSignature.value_or_default() && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr &&
@@ -1005,9 +947,6 @@ VALIDATE_HOOK(hkSetComputeRootDescriptorTableLate, PFN_SetComputeRootDescriptorT
 static void hkSetComputeRootDescriptorTableLate(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                 D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, true, RootParameterIndex, DLSSNRCommandState::Kind::Table, BaseDescriptor.ptr);
-
     lateInProgressSetComputeRootDescriptorTable = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && BaseDescriptor.ptr)
@@ -1031,9 +970,6 @@ static void hkSetComputeRoot32BitConstantsLate(ID3D12GraphicsCommandList* comman
                                                UINT Num32BitValuesToSet, const void* pSrcData,
                                                UINT DestOffsetIn32BitValues)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commandList, true, RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
-
     lateInProgressSetComputeRoot32BitConstants = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && pSrcData)
@@ -1060,9 +996,6 @@ VALIDATE_HOOK(hkSetComputeRoot32BitConstantLate, PFN_SetComputeRoot32BitConstant
 static void hkSetComputeRoot32BitConstantLate(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                               UINT SrcData, UINT DestOffsetIn32BitValues)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commandList, true, RootParameterIndex, 1, &SrcData, DestOffsetIn32BitValues);
-
     lateInProgressSetComputeRoot32BitConstant = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
@@ -1086,9 +1019,6 @@ VALIDATE_HOOK(hkSetComputeRootConstantBufferViewLate, PFN_SetComputeRootConstant
 static void hkSetComputeRootConstantBufferViewLate(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                    D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, true, RootParameterIndex, DLSSNRCommandState::Kind::CBV, BufferLocation);
-
     lateInProgressSetComputeRootConstantBufferView = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
@@ -1111,9 +1041,6 @@ VALIDATE_HOOK(hkSetComputeRootShaderResourceViewLate, PFN_SetComputeRootShaderRe
 static void hkSetComputeRootShaderResourceViewLate(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                    D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, true, RootParameterIndex, DLSSNRCommandState::Kind::SRV, BufferLocation);
-
     lateInProgressSetComputeRootShaderResourceView = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
@@ -1136,9 +1063,6 @@ VALIDATE_HOOK(hkSetComputeRootUnorderedAccessViewLate, PFN_SetComputeRootUnorder
 static void hkSetComputeRootUnorderedAccessViewLate(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                     D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, true, RootParameterIndex, DLSSNRCommandState::Kind::UAV, BufferLocation);
-
     lateInProgressSetComputeRootUnorderedAccessView = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
@@ -1160,9 +1084,6 @@ static void hkSetComputeRootUnorderedAccessViewLate(ID3D12GraphicsCommandList* c
 VALIDATE_HOOK(hkSetGraphicsRootSignatureLate, PFN_SetGraphicsRootSignature)
 static void hkSetGraphicsRootSignatureLate(ID3D12GraphicsCommandList* commandList, ID3D12RootSignature* pRootSignature)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Signature(commandList, false, pRootSignature);
-
     lateInProgressSetGraphicsRootSignature = true;
 
     if (Config::Instance()->RestoreGraphicSignature.value_or_default() && !isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr &&
@@ -1181,9 +1102,6 @@ VALIDATE_HOOK(hkSetGraphicsRootDescriptorTableLate, PFN_SetGraphicsRootDescripto
 static void hkSetGraphicsRootDescriptorTableLate(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                  D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, false, RootParameterIndex, DLSSNRCommandState::Kind::Table, BaseDescriptor.ptr);
-
     lateInProgressSetGraphicsRootDescriptorTable = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && BaseDescriptor.ptr)
@@ -1207,9 +1125,6 @@ static void hkSetGraphicsRoot32BitConstantsLate(ID3D12GraphicsCommandList* comma
                                                 UINT Num32BitValuesToSet, const void* pSrcData,
                                                 UINT DestOffsetIn32BitValues)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commandList, false, RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
-
     lateInProgressSetGraphicsRoot32BitConstants = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr && pSrcData)
@@ -1236,9 +1151,6 @@ VALIDATE_HOOK(hkSetGraphicsRoot32BitConstantLate, PFN_SetGraphicsRoot32BitConsta
 static void hkSetGraphicsRoot32BitConstantLate(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                UINT SrcData, UINT DestOffsetIn32BitValues)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commandList, false, RootParameterIndex, 1, &SrcData, DestOffsetIn32BitValues);
-
     lateInProgressSetGraphicsRoot32BitConstant = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
@@ -1262,9 +1174,6 @@ VALIDATE_HOOK(hkSetGraphicsRootConstantBufferViewLate, PFN_SetGraphicsRootConsta
 static void hkSetGraphicsRootConstantBufferViewLate(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                     D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, false, RootParameterIndex, DLSSNRCommandState::Kind::CBV, BufferLocation);
-
     lateInProgressSetGraphicsRootConstantBufferView = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
@@ -1287,9 +1196,6 @@ VALIDATE_HOOK(hkSetGraphicsRootShaderResourceViewLate, PFN_SetGraphicsRootShader
 static void hkSetGraphicsRootShaderResourceViewLate(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                     D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, false, RootParameterIndex, DLSSNRCommandState::Kind::SRV, BufferLocation);
-
     lateInProgressSetGraphicsRootShaderResourceView = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)
@@ -1312,9 +1218,6 @@ VALIDATE_HOOK(hkSetGraphicsRootUnorderedAccessViewLate, PFN_SetGraphicsRootUnord
 static void hkSetGraphicsRootUnorderedAccessViewLate(ID3D12GraphicsCommandList* commandList, UINT RootParameterIndex,
                                                      D3D12_GPU_VIRTUAL_ADDRESS BufferLocation)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default() && !isUpscalerActive)
-        DLSSNRCommandState::Value(commandList, false, RootParameterIndex, DLSSNRCommandState::Kind::UAV, BufferLocation);
-
     lateInProgressSetGraphicsRootUnorderedAccessView = true;
 
     if (!isUpscalerActive && !DLSSNRCommandState::suppress && commandList != nullptr)

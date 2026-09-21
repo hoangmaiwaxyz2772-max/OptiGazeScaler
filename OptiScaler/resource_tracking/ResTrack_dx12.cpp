@@ -47,6 +47,9 @@ std::string LateAddress(void* address)
 }
 void LateCommandIdentity(ID3D12GraphicsCommandList* commands)
 {
+    static thread_local unsigned batch = 0;
+    const auto count = batch++;
+    if (count >= 3 && (count & 255) != 0) return;
     static DLSSNRDiagnostics::Gate gate;
     if (!gate.Sample()) return;
     auto table = *reinterpret_cast<void***>(commands);
@@ -70,7 +73,7 @@ void STDMETHODCALLTYPE hkLateExecuteIndirect(ID3D12GraphicsCommandList* commands
     {
         lateStats.indirect.fetch_add(1, std::memory_order_relaxed);
         if (DLSSNRLatePass::Pending()) lateStats.pendingIndirect.fetch_add(1, std::memory_order_relaxed);
-        DLSSNR_DIAG("indirect-entry", "cmd=0x{:X} signature=0x{:X} maxCount={} pending={} active={}",
+        DLSSNR_HOT_DIAG("indirect-entry", "cmd=0x{:X} signature=0x{:X} maxCount={} pending={} active={}",
             (uintptr_t)commands, (uintptr_t)signature, maxCount, DLSSNRLatePass::Pending(), Hudfix_Dx12::IsResourceCheckActive());
     }
     o_LateExecuteIndirect(commands, signature, maxCount, arguments, offset, countBuffer, countOffset);
@@ -180,24 +183,24 @@ static PFN_CopyDescriptorsSimple o_CopyDescriptorsSimple = nullptr;
 static PFN_Dispatch o_Dispatch = nullptr;
 static PFN_DrawInstanced o_DrawInstanced = nullptr;
 static PFN_DrawIndexedInstanced o_DrawIndexedInstanced = nullptr;
-static PFN_ExecuteBundle o_ExecuteBundle = nullptr;
-static PFN_Close o_Close = nullptr;
 using PFN_LateReset = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*, ID3D12PipelineState*);
 using PFN_LateBeginRenderPass = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList4*, UINT,
     const D3D12_RENDER_PASS_RENDER_TARGET_DESC*, const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*, D3D12_RENDER_PASS_FLAGS);
 using PFN_LateEndRenderPass = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList4*);
-static PFN_LateReset o_LateReset = nullptr;
-static PFN_LateBeginRenderPass o_LateBeginRenderPass = nullptr;
-static PFN_LateEndRenderPass o_LateEndRenderPass = nullptr;
+using CaptureReset = DLSSNRMethodHooks::MethodHook<10, PFN_LateReset>;
+using CaptureClose = DLSSNRMethodHooks::MethodHook<9, PFN_Close>;
+using CaptureBundle = DLSSNRMethodHooks::MethodHook<27, PFN_ExecuteBundle>;
+using CaptureBeginRenderPass = DLSSNRMethodHooks::MethodHook<68, PFN_LateBeginRenderPass>;
+using CaptureEndRenderPass = DLSSNRMethodHooks::MethodHook<69, PFN_LateEndRenderPass>;
 static HRESULT STDMETHODCALLTYPE hkLateReset(ID3D12GraphicsCommandList* list, ID3D12CommandAllocator* allocator,
                                              ID3D12PipelineState* pipeline)
 {
-    HRESULT result = o_LateReset(list, allocator, pipeline);
+    HRESULT result = CaptureReset::Forward(list, allocator, pipeline);
     if (SUCCEEDED(result))
     {
         DLSSNRPipelineTrace::ResetList(list);
         const bool ready = ResTrack_Dx12::ObserveCommandList(list);
-        DLSSNRCommandState::Reset(list, pipeline, ready && Config::Instance()->DLSSNRLateHudless.value_or_default());
+        DLSSNRCommandState::Reset(list, pipeline, ready && DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()));
     }
     return result;
 }
@@ -205,17 +208,17 @@ static void STDMETHODCALLTYPE hkLateBeginRenderPass(ID3D12GraphicsCommandList4* 
     const D3D12_RENDER_PASS_RENDER_TARGET_DESC* targets, const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* depth,
     D3D12_RENDER_PASS_FLAGS flags)
 {
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default())
+    if (DLSSNRLatePass::Enabled())
     {
         DLSSNRCommandState::RenderPass(list, true);
         if (!DLSSNRCommandState::suppress) lateStats.renderPasses.fetch_add(1, std::memory_order_relaxed);
     }
-    o_LateBeginRenderPass(list, count, targets, depth, flags);
+    CaptureBeginRenderPass::Forward(list, count, targets, depth, flags);
 }
 static void STDMETHODCALLTYPE hkLateEndRenderPass(ID3D12GraphicsCommandList4* list)
 {
-    o_LateEndRenderPass(list);
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default()) DLSSNRCommandState::RenderPass(list, false);
+    CaptureEndRenderPass::Forward(list);
+    if (DLSSNRLatePass::Enabled()) DLSSNRCommandState::RenderPass(list, false);
 }
 
 static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
@@ -982,29 +985,10 @@ static ULONG STDMETHODCALLTYPE hkHeapRelease(ID3D12DescriptorHeap* This)
 
             LOG_INFO("Heap released: {:X}", (size_t) This);
 
-            // detach all slots from _trackedResources
-            {
-                std::scoped_lock lk(_trackedResourcesMutex);
-
-                for (UINT j = 0; j < up->numDescriptors; ++j)
-                {
-                    auto& slot = up->info[j];
-
-                    if (slot.buffer == nullptr)
-                        continue;
-
-                    if (auto it = _trackedResources.find(slot.buffer); it != _trackedResources.end())
-                    {
-                        auto& vec = it->second;
-                        vec.erase(std::remove(vec.begin(), vec.end(), &slot), vec.end());
-                        if (vec.empty())
-                            _trackedResources.erase(it);
-                    }
-
-                    slot.buffer = nullptr;
-                    slot.lastUsedFrame = 0;
-                }
-            }
+            // Use the same indexed removal as descriptor overwrites. Heap
+            // teardown must not reintroduce quadratic reverse-index scans.
+            for (UINT j = 0; j < up->numDescriptors; ++j)
+                up->ClearByCpuHandle(up->cpuStart + static_cast<SIZE_T>(j) * up->increment);
 
             gHeapGeneration.fetch_add(1, std::memory_order_release); // invalidate caches
         }
@@ -1110,28 +1094,21 @@ ULONG ResTrack_Dx12::hkRelease(ID3D12Resource* This)
     if (State::Instance().isShuttingDown)
         return o_Release(This);
 
-    std::vector<ResourceInfo*> toClean;
+    // Serialize refcount probes and the existing captured-HUDless bookkeeping,
+    // independently of the descriptor-copy locks.
+    static std::mutex releaseMutex;
     {
-        std::lock_guard lock(_trackedResourcesMutex);
+        std::lock_guard lock(releaseMutex);
 
         This->AddRef();
         auto refCount = o_Release(This);
 
-        if (refCount <= 1 && _trackedResources.contains(This))
+        if (refCount <= 1)
         {
-            toClean = _trackedResources[This]; // Copy vector
-            _trackedResources.erase(This);
-            State::Instance().capturedHudlesses.erase(This);
-        }
-    }
-
-    // Clean up outside lock
-    for (auto* info : toClean)
-    {
-        if (info->buffer == This)
-        {
-            info->buffer = nullptr;
-            info->lastUsedFrame = 0;
+            auto& shard = ResourceReferences(This);
+            std::scoped_lock referencesLock(shard.mutex);
+            if (shard.Invalidate(This))
+                State::Instance().capturedHudlesses.erase(This);
         }
     }
 
@@ -1214,8 +1191,8 @@ void ResTrack_Dx12::hkCopyDescriptors(ID3D12Device* This, UINT NumDestDescriptor
             // Get source resource info with proper synchronization
             if (cachedSrcHeap != nullptr)
             {
-                // Access to heap info is synchronized through HeapInfo's const methods
-                // which use _trackedResourcesMutex internally
+                // The application must keep source descriptors stable during
+                // the native copy; reverse membership has per-resource locks.
                 srcInfo = cachedSrcHeap->GetByCpuHandle(srcHandle);
             }
 
@@ -1231,7 +1208,7 @@ void ResTrack_Dx12::hkCopyDescriptors(ID3D12Device* This, UINT NumDestDescriptor
         // Update destination heap tracking with proper synchronization
         if (cachedDestHeap != nullptr)
         {
-            // HeapInfo's Set/Clear methods use _trackedResourcesMutex internally
+            // Set/Clear maintain the reverse index under its resource-shard lock.
             if (srcInfo != nullptr && srcInfo->buffer != nullptr)
                 cachedDestHeap->SetByCpuHandle(destHandle, *srcInfo);
             else
@@ -1415,7 +1392,7 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
     {
         lateStats.om.fetch_add(1, std::memory_order_relaxed);
         LateCommandIdentity(This);
-        DLSSNR_DIAG("om-entry", "cmd=0x{:X} targets={} pending={} active={} skip={} disabled={} menu={}",
+        DLSSNR_HOT_DIAG("om-entry", "cmd=0x{:X} targets={} pending={} active={} skip={} disabled={} menu={}",
             (uintptr_t)This, NumRenderTargetDescriptors, DLSSNRLatePass::Pending(), IsHudFixActive(),
             Hudfix_Dx12::SkipHudlessChecks(), Config::Instance()->FGHudfixDisableOM.value_or_default(),
             This == MenuOverlayDx::MenuCommandList());
@@ -1663,7 +1640,7 @@ void ResTrack_Dx12::CheckLateInputs(ID3D12GraphicsCommandList* commands, UINT ca
         if (DLSSNRCommandState::suppress) lateStats.suppressedDraws[kind].fetch_add(1, std::memory_order_relaxed);
         else if (DLSSNRLatePass::Pending()) lateStats.pendingDraws[kind].fetch_add(1, std::memory_order_relaxed);
         if (!DLSSNRCommandState::suppress)
-            DLSSNR_DIAG("consumer-entry", "kind={} cmd=0x{:X} pending={} active={} disabled(DI/DII/Dispatch)={}/{}/{}",
+            DLSSNR_HOT_DIAG("consumer-entry", "kind={} cmd=0x{:X} pending={} active={} disabled(DI/DII/Dispatch)={}/{}/{}",
                 kind, (uintptr_t)commands, DLSSNRLatePass::Pending(), IsHudFixActive(),
                 Config::Instance()->FGHudfixDisableDI.value_or_default(), Config::Instance()->FGHudfixDisableDII.value_or_default(),
                 Config::Instance()->FGHudfixDisableDispatch.value_or_default());
@@ -1984,9 +1961,9 @@ void ResTrack_Dx12::hkExecuteBundle(ID3D12GraphicsCommandList* This, ID3D12Graph
         }
     }
 
-    if (Config::Instance()->DLSSNRLateHudless.value_or_default())
+    if (DLSSNRLatePass::Enabled())
         DLSSNRCommandState::Invalidate(This); // bundle-inherited bindings are not reconstructible here
-    o_ExecuteBundle(This, pCommandList);
+    CaptureBundle::Forward(This, pCommandList);
 }
 
 HRESULT ResTrack_Dx12::hkClose(ID3D12GraphicsCommandList* This)
@@ -2025,7 +2002,7 @@ HRESULT ResTrack_Dx12::hkClose(ID3D12GraphicsCommandList* This)
     }
 
     DLSSNRCommandState::Reset(This);
-    const auto result = o_Close(This);
+    const auto result = CaptureClose::Forward(This);
     DLSSNRPipelineTrace::Mark("list-close", This, nullptr, static_cast<UINT>(result));
     return result;
 }
@@ -2196,12 +2173,42 @@ void ResTrack_Dx12::HookResource(ID3D12Device* InDevice)
     }
 }
 
+static std::atomic<uint64_t> commandHookGeneration {0};
+template<class Hook>
+static bool InstallLateLifecycleMethod(void* target, typename Hook::Function callback, const char* name)
+{
+    bool added = false;
+    const auto result = Hook::Install(target, callback, &added);
+    if (added) LOG_INFO("[DLSSNR_LATE] lifecycle hook={} target=[{}]", name, LateAddress(target));
+    if (result != NO_ERROR) DLSSNR_DIAG("lifecycle-hook-failed", "method={} result={}", name, result);
+    return result == NO_ERROR;
+}
 bool ResTrack_Dx12::ObserveCommandList(ID3D12GraphicsCommandList* commands)
 {
     if (!commands || DLSSNRCommandState::suppress || State::Instance().isShuttingDown) return false;
     DLSSNRPipelineSplit::Observe(commands);
     bool ready = true;
     auto table = *reinterpret_cast<void***>(commands);
+    // OM bindings and Reset repeatedly observe the same implementation. Cache
+    // only complete installations, with teardown invalidating every thread.
+    static thread_local uint64_t seenGeneration = ~uint64_t(0);
+    static thread_local bool seenTracking = false;
+    static thread_local std::unordered_set<void**> observed;
+    const auto generation = commandHookGeneration.load(std::memory_order_acquire);
+    const bool tracking = DLSSNRLatePass::TrackDescriptors();
+    if (seenGeneration != generation || seenTracking != tracking)
+    { observed.clear(); seenGeneration = generation; seenTracking = tracking; }
+    if (observed.contains(table)) return true;
+    ready &= InstallLateLifecycleMethod<CaptureReset>(table[10], hkLateReset, "Reset");
+    ready &= InstallLateLifecycleMethod<CaptureClose>(table[9], hkClose, "Close");
+    ready &= InstallLateLifecycleMethod<CaptureBundle>(table[27], hkExecuteBundle, "ExecuteBundle");
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> list4;
+    if (SUCCEEDED(commands->QueryInterface(IID_PPV_ARGS(&list4))))
+    {
+        auto table4 = *reinterpret_cast<void***>(list4.Get());
+        ready &= InstallLateLifecycleMethod<CaptureBeginRenderPass>(table4[68], hkLateBeginRenderPass, "BeginRenderPass");
+        ready &= InstallLateLifecycleMethod<CaptureEndRenderPass>(table4[69], hkLateEndRenderPass, "EndRenderPass");
+    }
     {
         bool added = false;
         const auto result = CaptureDrawInstanced::Install(table[12], hkDrawInstanced, &added);
@@ -2254,6 +2261,7 @@ bool ResTrack_Dx12::ObserveCommandList(ID3D12GraphicsCommandList* commands)
     }
     ready &= D3D12Hooks::TrackLateCommandState(commands);
     if (!ready) DLSSNRCommandState::Invalidate(commands);
+    else observed.insert(table);
     return ready;
 }
 
@@ -2292,20 +2300,9 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
             o_DrawIndexedInstanced = (PFN_DrawIndexedInstanced) pVTable[13];
             o_Dispatch = (PFN_Dispatch) pVTable[14];
             o_LateExecuteIndirect = (LateExecuteIndirect)pVTable[59];
-            o_Close = (PFN_Close) pVTable[9];
-            o_LateReset = (PFN_LateReset) pVTable[10];
-            Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> list4;
-            if (SUCCEEDED(realCL->QueryInterface(IID_PPV_ARGS(&list4))))
-            {
-                auto table4 = *reinterpret_cast<void***>(list4.Get());
-                o_LateBeginRenderPass = reinterpret_cast<PFN_LateBeginRenderPass>(table4[68]);
-                o_LateEndRenderPass = reinterpret_cast<PFN_LateEndRenderPass>(table4[69]);
-            }
 
             // hudless compute
             o_SetComputeRootDescriptorTable = (PFN_SetComputeRootDescriptorTable) pVTable[31];
-
-            o_ExecuteBundle = (PFN_ExecuteBundle) pVTable[27];
 
             ObserveCommandList(realCL);
             if (o_OMSetRenderTargets != nullptr)
@@ -2329,33 +2326,6 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                     const auto attachResult = DetourAttach(&(PVOID&)o_LateExecuteIndirect, hkLateExecuteIndirect);
                     LOG_INFO("[DLSSNR_DIAG][hook-attach] method=ExecuteIndirect result={}", attachResult);
                 }
-                if (o_LateReset)
-                {
-                    const auto attachResult = DetourAttach(&(PVOID&) o_LateReset, hkLateReset);
-                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkLateReset result={}", attachResult);
-                }
-                if (o_LateBeginRenderPass)
-                {
-                    const auto attachResult = DetourAttach(&(PVOID&) o_LateBeginRenderPass, hkLateBeginRenderPass);
-                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkLateBeginRenderPass result={}", attachResult);
-                }
-                if (o_LateEndRenderPass)
-                {
-                    const auto attachResult = DetourAttach(&(PVOID&) o_LateEndRenderPass, hkLateEndRenderPass);
-                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkLateEndRenderPass result={}", attachResult);
-                }
-                if (o_Close != nullptr)
-                {
-                    const auto attachResult = DetourAttach(&(PVOID&) o_Close, hkClose);
-                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkClose result={}", attachResult);
-                }
-
-                if (o_ExecuteBundle != nullptr)
-                {
-                    const auto attachResult = DetourAttach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
-                    LOG_INFO("[DLSSNR_DIAG][hook-attach] method=hkExecuteBundle result={}", attachResult);
-                }
-
                 auto detourResult = DetourTransactionCommit();
                 LOG_INFO("[DLSSNR_DIAG][hook-commit] result={}", detourResult);
                 if (detourResult != NO_ERROR)
@@ -2367,12 +2337,7 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                     o_DrawIndexedInstanced = nullptr;
                     o_Dispatch = nullptr;
                     o_LateExecuteIndirect = nullptr;
-                    o_Close = nullptr;
-                    o_LateReset = nullptr;
-                    o_LateBeginRenderPass = nullptr;
-                    o_LateEndRenderPass = nullptr;
                     o_SetComputeRootDescriptorTable = nullptr;
-                    o_ExecuteBundle = nullptr;
                 }
             }
 
@@ -2461,6 +2426,35 @@ void ResTrack_Dx12::LogLateCaptureDiagnostics()
         o_OMSetRenderTargets != nullptr, o_DrawInstanced != nullptr, o_Dispatch != nullptr);
 }
 
+// Observe creation before the first game binding, including a supplied PSO.
+using LateCreateListFn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, D3D12_COMMAND_LIST_TYPE,
+    ID3D12CommandAllocator*, ID3D12PipelineState*, REFIID, void**);
+using CaptureCreateList = DLSSNRMethodHooks::MethodHook<4012, LateCreateListFn>;
+using LateCreateList1Fn = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device4*, UINT, D3D12_COMMAND_LIST_TYPE,
+    D3D12_COMMAND_LIST_FLAGS, REFIID, void**);
+using CaptureCreateList1 = DLSSNRMethodHooks::MethodHook<4051, LateCreateList1Fn>;
+static void LateListCreated(HRESULT result, void** output, ID3D12PipelineState* pipeline, bool open)
+{
+    if (FAILED(result) || !output || !*output || DLSSNRCommandState::suppress) return;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
+    if (FAILED(static_cast<IUnknown*>(*output)->QueryInterface(IID_PPV_ARGS(&list)))) return;
+    const bool ready = ResTrack_Dx12::ObserveCommandList(list.Get());
+    DLSSNRCommandState::Reset(list.Get(), pipeline, open && ready && DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()));
+}
+static HRESULT STDMETHODCALLTYPE hkLateCreateList(ID3D12Device* device, UINT node, D3D12_COMMAND_LIST_TYPE type,
+    ID3D12CommandAllocator* allocator, ID3D12PipelineState* pipeline, REFIID iid, void** output)
+{
+    const auto result = CaptureCreateList::Forward(device, node, type, allocator, pipeline, iid, output);
+    LateListCreated(result, output, pipeline, true);
+    return result;
+}
+static HRESULT STDMETHODCALLTYPE hkLateCreateList1(ID3D12Device4* device, UINT node, D3D12_COMMAND_LIST_TYPE type,
+    D3D12_COMMAND_LIST_FLAGS flags, REFIID iid, void** output)
+{
+    const auto result = CaptureCreateList1::Forward(device, node, type, flags, iid, output);
+    LateListCreated(result, output, nullptr, false);
+    return result;
+}
 void ResTrack_Dx12::HookDevice(ID3D12Device* device)
 {
     if (o_CreateDescriptorHeap != nullptr ||
@@ -2473,7 +2467,8 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
     if (fgHeaps.capacity() < 65536)
     {
         _useShards = Config::Instance()->FGUseShards.value_or_default();
-        _trackedResources.reserve(1024);
+        for (auto& shard : _resourceReferenceShards)
+            shard.resources.reserve(32);
         fgHeaps.reserve(65536);
     }
 
@@ -2538,6 +2533,13 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
 
     HookToQueue(device);
     HookCommandList(device);
+    if (const auto result = CaptureCreateList::Install(pVTable[12], hkLateCreateList); result != NO_ERROR)
+        LOG_ERROR("Failed to hook CreateCommandList: {}", result);
+    Microsoft::WRL::ComPtr<ID3D12Device4> device4;
+    if (SUCCEEDED(realDevice->QueryInterface(IID_PPV_ARGS(&device4))))
+        if (const auto result = CaptureCreateList1::Install(
+                (*reinterpret_cast<void***>(device4.Get()))[51], hkLateCreateList1); result != NO_ERROR)
+            LOG_ERROR("Failed to hook CreateCommandList1: {}", result);
     HookResource(device);
     if (DLSSNRLatePass::TrackDescriptors())
         LOG_INFO("[DLSSNR_LATE] descriptor tracking initialized before capture; FG-independent metadata tracking=1");
@@ -2545,7 +2547,22 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
 
 static void RemoveCaptureMethodHooks()
 {
+    commandHookGeneration.fetch_add(1, std::memory_order_release);
     D3D12Hooks::ReleaseLateCommandStateHooks();
+    if (const auto result = CaptureCreateList::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove CaptureCreateList hooks: {}", result);
+    if (const auto result = CaptureCreateList1::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove CaptureCreateList1 hooks: {}", result);
+    if (const auto result = CaptureReset::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove CaptureReset hooks: {}", result);
+    if (const auto result = CaptureClose::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove CaptureClose hooks: {}", result);
+    if (const auto result = CaptureBundle::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove CaptureBundle hooks: {}", result);
+    if (const auto result = CaptureBeginRenderPass::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove CaptureBeginRenderPass hooks: {}", result);
+    if (const auto result = CaptureEndRenderPass::Remove(); result != NO_ERROR)
+        LOG_ERROR("Failed to remove CaptureEndRenderPass hooks: {}", result);
     if (const auto result = CaptureDrawInstanced::Remove(); result != NO_ERROR)
         LOG_ERROR("Failed to remove DrawInstanced entry hooks: {}", result);
     if (const auto result = CaptureDrawIndexedInstanced::Remove(); result != NO_ERROR)
@@ -2598,15 +2615,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
     if (o_LateExecuteIndirect != nullptr)
         DetourDetach(&(PVOID&)o_LateExecuteIndirect, hkLateExecuteIndirect);
 
-    if (o_LateReset) DetourDetach(&(PVOID&) o_LateReset, hkLateReset);
-    if (o_LateBeginRenderPass) DetourDetach(&(PVOID&) o_LateBeginRenderPass, hkLateBeginRenderPass);
-    if (o_LateEndRenderPass) DetourDetach(&(PVOID&) o_LateEndRenderPass, hkLateEndRenderPass);
-    if (o_Close != nullptr)
-        DetourDetach(&(PVOID&) o_Close, hkClose);
-
-    if (o_ExecuteBundle != nullptr)
-        DetourDetach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
-
     // Resource
     if (o_Release != nullptr)
         DetourDetach(&(PVOID&) o_Release, hkRelease);
@@ -2637,11 +2645,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
         o_DrawInstanced = nullptr;
         o_Dispatch = nullptr;
         o_LateExecuteIndirect = nullptr;
-        o_Close = nullptr;
-        o_LateReset = nullptr;
-        o_LateBeginRenderPass = nullptr;
-        o_LateEndRenderPass = nullptr;
-        o_ExecuteBundle = nullptr;
 
         // Resource
         o_Release = nullptr;
@@ -2700,15 +2703,6 @@ void ResTrack_Dx12::ReleaseHooks()
     if (o_LateExecuteIndirect != nullptr)
         DetourDetach(&(PVOID&)o_LateExecuteIndirect, hkLateExecuteIndirect);
 
-    if (o_LateReset) DetourDetach(&(PVOID&) o_LateReset, hkLateReset);
-    if (o_LateBeginRenderPass) DetourDetach(&(PVOID&) o_LateBeginRenderPass, hkLateBeginRenderPass);
-    if (o_LateEndRenderPass) DetourDetach(&(PVOID&) o_LateEndRenderPass, hkLateEndRenderPass);
-    if (o_Close != nullptr)
-        DetourDetach(&(PVOID&) o_Close, hkClose);
-
-    if (o_ExecuteBundle != nullptr)
-        DetourDetach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
-
     auto detourResult = DetourTransactionCommit();
     if (detourResult != NO_ERROR)
     {
@@ -2723,11 +2717,6 @@ void ResTrack_Dx12::ReleaseHooks()
         o_DrawInstanced = nullptr;
         o_Dispatch = nullptr;
         o_LateExecuteIndirect = nullptr;
-        o_Close = nullptr;
-        o_LateReset = nullptr;
-        o_LateBeginRenderPass = nullptr;
-        o_LateEndRenderPass = nullptr;
-        o_ExecuteBundle = nullptr;
     }
 }
 

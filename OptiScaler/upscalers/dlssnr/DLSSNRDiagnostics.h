@@ -26,3 +26,11 @@ struct Gate
     if (diagnosticGate.Sample()) \
         LOG_INFO("[DLSSNR_DIAG][" node "] " format, __VA_ARGS__); \
 } while (false)
+// Per-draw diagnostics must not read the clock or contend on a global atomic
+// for every game command. Preserve startup samples, then check in batches.
+#define DLSSNR_HOT_DIAG(node, format, ...) do { \
+    static thread_local unsigned diagnosticBatch = 0; \
+    const auto diagnosticCount = diagnosticBatch++; \
+    if (diagnosticCount < 3 || (diagnosticCount & 255) == 0) \
+        DLSSNR_DIAG(node, format, __VA_ARGS__); \
+} while (false)
