@@ -43,8 +43,8 @@ void EndAudit(const char* reason)
     if (!audit || !audit->active) return;
     audit->active = false;
     for (const auto& [key, count] : audit->reasons)
-        LOG_INFO("[DLSSNR_AUDIT_REASON] session={} reason={} occurrences={}", audit->id, key, count);
-    LOG_INFO("[DLSSNR_AUDIT] session={} end={} recordings={} snapshots={} exampleOmitted={} objectDetailsOmitted={} coverage=observed-paths-only",
+        spdlog::info("{} [DLSSNR_AUDIT_REASON] session={} reason={} occurrences={}", __FUNCTION__, audit->id, key, count);
+    spdlog::info("{} [DLSSNR_AUDIT] session={} end={} recordings={} snapshots={} exampleOmitted={} objectDetailsOmitted={} coverage=observed-paths-only", __FUNCTION__,
              audit->id, reason, audit->recordings, audit->snapshots, audit->omitted, missingObjectsOmitted);
 }
 bool AuditActive(const std::shared_ptr<Audit>& a)
@@ -279,7 +279,7 @@ void Issue(Footprint& f, const char* reason, UINT64 object = 0, UINT64 detail = 
     if (++a.examplesPerReason[key] <= 8 && a.examples < 256)
     {
         ++a.examples;
-        LOG_INFO("[DLSSNR_AUDIT_ISSUE] session={} list=0x{:X} part={} reason={} object=0x{:X} detail=0x{:X}",
+        spdlog::info("{} [DLSSNR_AUDIT_ISSUE] session={} list=0x{:X} part={} reason={} object=0x{:X} detail=0x{:X}", __FUNCTION__,
                  a.id, f.list, f.tail ? "tail" : "prefix", reason, object, detail);
     }
     else ++a.omitted;
@@ -407,7 +407,7 @@ ResolveStats Resolve(Footprint& result)
                 if (a.descriptorExamples.size() < 256)
                 {
                     if (a.descriptorExamples.insert(handle).second)
-                        LOG_INFO("[DLSSNR_AUDIT_DESCRIPTOR] session={} list=0x{:X} part={} heap=0x{:X} slot={} cpu=0x{:X} gpu=0x{:X} sourceCpu=0x{:X} write={} missingObject={} missingCounter={} reason={} bufferAddress=0x{:X}",
+                        spdlog::info("{} [DLSSNR_AUDIT_DESCRIPTOR] session={} list=0x{:X} part={} heap=0x{:X} slot={} cpu=0x{:X} gpu=0x{:X} sourceCpu=0x{:X} write={} missingObject={} missingCounter={} reason={} bufferAddress=0x{:X}", __FUNCTION__,
                             a.id, result.list, result.tail ? "tail" : "prefix", table.heap->object, it->first, handle,
                             table.heap->gpu + UINT64(it->first) * table.heap->increment, it->second.sourceHandle,
                             it->second.write, it->second.missingResource, it->second.missingCounter, it->second.unknown,
@@ -510,14 +510,14 @@ void RecordCreation(ID3D12Resource* resource, UINT slot, ID3D12Heap* heap,
         if (++sharedSamples <= 8 || sharedSamples % 3000 == 0)
         {
             const auto desc = resource->GetDesc();
-            LOG_INFO("[DLSSNR_ASYNC_SHARED] sample={} resource=0x{:X} id={} creationSlot={} dimension={} width={} height={} format={} policy=shared-domain-and-original-entry-waits",
+            spdlog::info("{} [DLSSNR_ASYNC_SHARED] sample={} resource=0x{:X} id={} creationSlot={} dimension={} width={} height={} format={} policy=shared-domain-and-original-entry-waits", __FUNCTION__,
                 sharedSamples, uintptr_t(resource), identity->id, slot, UINT(desc.Dimension), desc.Width, desc.Height, UINT(desc.Format));
         }
     }
     static std::map<std::pair<UINT, std::string>, UINT64> counters;
     const auto sample = ++counters[{slot, result}];
     if (sample <= 3 || sample % 3000 == 0)
-        LOG_INFO("[DLSSNR_ACCESS_CREATE] slot={} result={} sample={} resource=0x{:X} heap=0x{:X} heapId={} offset={} bytes={} metadataHr=0x{:08X}",
+        spdlog::info("{} [DLSSNR_ACCESS_CREATE] slot={} result={} sample={} resource=0x{:X} heap=0x{:X} heapId={} offset={} bytes={} metadataHr=0x{:08X}", __FUNCTION__,
             slot, result, sample, uintptr_t(resource), record.heap, record.heapIdentity, offset, bytes, UINT(stored));
 }
 
@@ -605,7 +605,7 @@ struct Creation<Slot, Member, HRESULT(STDMETHODCALLTYPE Object::*)(Args...)>
                     RecordCreation(resource.Get(), Slot, nullptr, 0, UINT64_MAX,
                                    RegisterResource(resource.Get(), nullptr, true));
             }
-            else LOG_WARN("[DLSSNR_ACCESS_CREATE] slot={} result=resource-interface-unavailable", Slot);
+            else spdlog::warn("{} [DLSSNR_ACCESS_CREATE] slot={} result=resource-interface-unavailable", __FUNCTION__, Slot);
         }
         return result;
     }
@@ -627,7 +627,7 @@ std::string AuditLocation(const void* address)
 template<unsigned Slot, auto Member, class T> void AuditCreator(UINT64 id, T* device)
 {
     const auto entry = (*reinterpret_cast<void***>(device))[Slot];
-    LOG_INFO("[DLSSNR_AUDIT_CREATOR] objectRecord={} slot={} entry=0x{:X} hooked={} location={}",
+    spdlog::info("{} [DLSSNR_AUDIT_CREATOR] objectRecord={} slot={} entry=0x{:X} hooked={} location={}", __FUNCTION__,
         id, Slot, uintptr_t(entry), Creation<Slot, Member>::Hook::Contains(entry), AuditLocation(entry));
 }
 UINT64 DescribeMissingResource(ID3D12Resource* resource, const char* origin)
@@ -648,10 +648,10 @@ UINT64 DescribeMissingResource(ID3D12Resource* resource, const char* origin)
     const auto heapResult = resource->GetHeapProperties(&properties, &flags);
     CreationMetadata creation; UINT creationBytes = sizeof(creation);
     const auto creationResult = resource->GetPrivateData(CreationMetadataId, &creationBytes, &creation);
-    LOG_INFO("[DLSSNR_AUDIT_ORIGIN] record={} observed={} slot={} result={} heap=0x{:X} heapId={} offset={} bytes={}",
+    spdlog::info("{} [DLSSNR_AUDIT_ORIGIN] record={} observed={} slot={} result={} heap=0x{:X} heapId={} offset={} bytes={}", __FUNCTION__,
         id, SUCCEEDED(creationResult), creation.slot, SUCCEEDED(creationResult) ? creation.result : "creation-not-observed",
         creation.heap, creation.heapIdentity, creation.offset, creation.bytes);
-    LOG_INFO("[DLSSNR_AUDIT_OBJECT] record={} resource=0x{:X} origin={} dimension={} width={} height={} depth={} format={} flags={} heapResult=0x{:X} heapType={} heapFlags={} vtable=0x{:X} pointer-is-not-lifetime-id",
+    spdlog::info("{} [DLSSNR_AUDIT_OBJECT] record={} resource=0x{:X} origin={} dimension={} width={} height={} depth={} format={} flags={} heapResult=0x{:X} heapType={} heapFlags={} vtable=0x{:X} pointer-is-not-lifetime-id", __FUNCTION__,
         id, uintptr_t(resource), origin, UINT(desc.Dimension), desc.Width, desc.Height, desc.DepthOrArraySize,
         UINT(desc.Format), UINT(desc.Flags), UINT(heapResult), UINT(properties.Type), UINT(flags),
         uintptr_t(*reinterpret_cast<void***>(resource)));
@@ -695,7 +695,7 @@ UINT64 DescribeMissingResource(ID3D12Resource* resource, const char* origin)
     void* stack[8] {};
     const auto depth = CaptureStackBackTrace(1, UINT(std::size(stack)), stack, nullptr);
     for (USHORT i = 0; i < depth; ++i)
-        LOG_INFO("[DLSSNR_AUDIT_OBJECT_STACK] record={} depth={} location={}", id, i, AuditLocation(stack[i]));
+        spdlog::info("{} [DLSSNR_AUDIT_OBJECT_STACK] record={} depth={} location={}", __FUNCTION__, id, i, AuditLocation(stack[i]));
     return id;
 }
 
@@ -863,7 +863,7 @@ void ObserveBackBuffer(ID3D12Resource* resource)
         // A fence join does not transfer DXGI presentation ownership. Mark
         // the existing identity too: descriptors/snapshots may already hold it.
         if (!identity->originalQueueOnly.exchange(true))
-            LOG_INFO("[DLSSNR_ACCESS_QUEUE] resource=0x{:X} id={} reason=swapchain-backbuffer policy=original-queue",
+            spdlog::info("{} [DLSSNR_ACCESS_QUEUE] resource=0x{:X} id={} reason=swapchain-backbuffer policy=original-queue", __FUNCTION__,
                      identity->object, identity->id);
     }
 }
@@ -932,7 +932,7 @@ void Initialize(ID3D12Device* device)
     ready &= CopySimpleHook::Install(table[24], CopySimple) == NO_ERROR;
     installationFailed |= !ready;
     enabled = ready && !installationFailed;
-    LOG_INFO("[DLSSNR_ASYNC] access tracking ready={} unknown resources/descriptors remain dependencies", enabled.load());
+    spdlog::info("{} [DLSSNR_ASYNC] access tracking ready={} unknown resources/descriptors remain dependencies", __FUNCTION__, enabled.load());
 }
 void Reset(ID3D12GraphicsCommandList* list)
 {
@@ -992,7 +992,7 @@ Snapshot Capture(ID3D12GraphicsCommandList* list, bool prefix)
     if (AuditActive(result->audit))
     {
         ++result->audit->snapshots;
-        LOG_INFO("[DLSSNR_AUDIT_SNAPSHOT] session={} list=0x{:X} part={} resources={} tables={} scanned={} globalBarrier={} namedAliases={} wildcardAliases={} globalUavs={} splitTransitions={} complete={} firstReason={} hasWork={} originalQueueOnly={}",
+        spdlog::info("{} [DLSSNR_AUDIT_SNAPSHOT] session={} list=0x{:X} part={} resources={} tables={} scanned={} globalBarrier={} namedAliases={} wildcardAliases={} globalUavs={} splitTransitions={} complete={} firstReason={} hasWork={} originalQueueOnly={}", __FUNCTION__,
             result->audit->id, uintptr_t(list), prefix ? "prefix" : "tail", result->access.size(), tables,
             stats.descriptors, result->ordersAllResources, result->namedAliases, result->wildcardAliases, result->globalUavs,
             result->splitTransitions, !result->incomplete, result->incomplete ? result->incomplete : "none", result->hasWork,
@@ -1014,7 +1014,7 @@ Snapshot Capture(ID3D12GraphicsCommandList* list, bool prefix)
     if (sample <= 3 || sample % 600 == 0)
     {
         const auto end = std::chrono::steady_clock::now();
-        LOG_INFO("[DLSSNR_ASYNC_CPU] capture={} prefix={} lockUs={} totalUs={} tableRefs={} ranges={} descriptors={} resources={} globalBarrier={} reason={}",
+        spdlog::info("{} [DLSSNR_ASYNC_CPU] capture={} prefix={} lockUs={} totalUs={} tableRefs={} ranges={} descriptors={} resources={} globalBarrier={} reason={}", __FUNCTION__,
                  sample, prefix,
                  std::chrono::duration_cast<std::chrono::microseconds>(acquired - start).count(),
                  std::chrono::duration_cast<std::chrono::microseconds>(end - start).count(),
@@ -1108,7 +1108,7 @@ Snapshot MappingPoint(const std::shared_ptr<Identity>& resource, const char* ope
     const char* reason = result->incomplete ? result->incomplete : "complete";
     const auto sample = ++samples[{operation, reason}];
     if (sample <= 3 || sample % 3000 == 0)
-        LOG_INFO("[DLSSNR_ASYNC_TILES] operation={} sample={} resource=0x{:X} ranges={} history={} reason={} policy=historical-physical-ranges-and-queue-order",
+        spdlog::info("{} [DLSSNR_ASYNC_TILES] operation={} sample={} resource=0x{:X} ranges={} history={} reason={} policy=historical-physical-ranges-and-queue-order", __FUNCTION__,
             operation, sample, resource ? resource->object : 0, ranges, resource ? resource->backing.size() : 0, reason);
     return result;
 }
@@ -1186,7 +1186,7 @@ void AuditBoundary()
         // the later in-game captures. Observation numbers never repeat.
         missingObjects.clear();
         audit = std::make_shared<Audit>(); audit->id = ++auditSerial;
-        LOG_INFO("[DLSSNR_AUDIT] session={} start={} nrBoundary={} maxNrBoundaries=8 maxRecordings=512 maxSeconds=5 maxExamples=256 mode=observe-all-blockers admission=unchanged",
+        spdlog::info("{} [DLSSNR_AUDIT] session={} start={} nrBoundary={} maxNrBoundaries=8 maxRecordings=512 maxSeconds=5 maxExamples=256 mode=observe-all-blockers admission=unchanged", __FUNCTION__,
                  audit->id, manual ? "PipelineDebug" : "automatic", nrBoundaries);
     }
 }
@@ -1203,7 +1203,7 @@ void AuditConflicts(UINT64 session, const Snapshot& prefix, const Snapshot& prio
     constexpr UINT64 PairLimit = 65536;
     const auto emit = [&](const char* kind, const Identity& a, const Identity& b) {
         if (++emitted > 32) { ++audit->omitted; return; }
-        LOG_INFO("[DLSSNR_AUDIT_CONFLICT] session={} fence=0x{:X} value={} kind={} prefixId={} priorId={} prefixObject=0x{:X} priorObject=0x{:X} resourceKind={} allocation={} prefixOffset={} prefixBytes={} priorOffset={} priorBytes={}",
+        spdlog::info("{} [DLSSNR_AUDIT_CONFLICT] session={} fence=0x{:X} value={} kind={} prefixId={} priorId={} prefixObject=0x{:X} priorObject=0x{:X} resourceKind={} allocation={} prefixOffset={} prefixBytes={} priorOffset={} priorBytes={}", __FUNCTION__,
             session, uintptr_t(fence), value, kind, a.id, b.id, a.object, b.object, a.kind,
             a.allocation ? a.allocation->id : 0, a.allocationOffset, a.allocationBytes, b.allocationOffset, b.allocationBytes);
     };
@@ -1229,7 +1229,7 @@ void AuditConflicts(UINT64 session, const Snapshot& prefix, const Snapshot& prio
             if (inspected > PairLimit) break;
         }
     }
-    LOG_INFO("[DLSSNR_AUDIT_DEPENDENCY] session={} fence=0x{:X} value={} prefixComplete={} priorComplete={} prefixReason={} priorReason={} prefixGlobalBarrier={} priorGlobalBarrier={} knownShared={} knownAlias={} conflictExamplesOmitted={} pairScanTruncated={} missing-coverage-is-still-a-dependency",
+    spdlog::info("{} [DLSSNR_AUDIT_DEPENDENCY] session={} fence=0x{:X} value={} prefixComplete={} priorComplete={} prefixReason={} priorReason={} prefixGlobalBarrier={} priorGlobalBarrier={} knownShared={} knownAlias={} conflictExamplesOmitted={} pairScanTruncated={} missing-coverage-is-still-a-dependency", __FUNCTION__,
         session, uintptr_t(fence), value, Complete(prefix), Complete(prior), Complete(prefix) ? "none" : Reason(prefix),
         Complete(prior) ? "none" : Reason(prior), prefix && prefix->ordersAllResources, prior && prior->ordersAllResources,
         shared, aliased, emitted > 32 ? emitted - 32 : 0, inspected > PairLimit);
@@ -1308,7 +1308,7 @@ void Barriers(ID3D12GraphicsCommandList* list, UINT count, const D3D12_RESOURCE_
             static UINT64 samples[6] {};
             const auto sample = ++samples[kind];
             if (sample <= 3 || sample % 3000 == 0)
-                LOG_INFO("[DLSSNR_ASYNC] barrier={} kind={} flags={} prefix={} policy={}", sample,
+                spdlog::info("{} [DLSSNR_ASYNC] barrier={} kind={} flags={} prefix={} policy={}", __FUNCTION__, sample,
                     static_cast<unsigned>(b.Type), static_cast<unsigned>(b.Flags), !r->cut,
                     kind == 0 || kind == 5 ? "opaque" : kind == 2 || kind == 4 ? "retain-all-dependencies" : "resource-conflicts");
         }
@@ -1478,7 +1478,7 @@ void Shader(ID3D12GraphicsCommandList* list, bool compute, bool indexed, bool me
                 Issue(f, "untracked-root-table", b.tables[i], i);
                 if (AuditActive(f.audit) && f.audit->rootExamples.size() < 64 &&
                     f.audit->rootExamples.emplace(uintptr_t(list), compute, i).second)
-                    LOG_INFO("[DLSSNR_AUDIT_ROOT] session={} list=0x{:X} compute={} mesh={} parameter={} visibility={} root=0x{:X} table=0x{:X} heap=0x{:X} heapGpu=0x{:X} rangeOffset={} rangeCount={} lastInvalidation={}",
+                    spdlog::info("{} [DLSSNR_AUDIT_ROOT] session={} list=0x{:X} compute={} mesh={} parameter={} visibility={} root=0x{:X} table=0x{:X} heap=0x{:X} heapGpu=0x{:X} rangeOffset={} rangeCount={} lastInvalidation={}", __FUNCTION__,
                         f.audit->id, uintptr_t(list), compute, mesh, i, UINT(visibility), b.rootObject,
                         b.tables[i], heap ? heap->object : 0, heap ? heap->gpu : 0, range.offset, range.count, b.invalidation);
                 continue;

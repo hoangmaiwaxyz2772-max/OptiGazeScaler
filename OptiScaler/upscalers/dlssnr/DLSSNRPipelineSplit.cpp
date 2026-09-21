@@ -207,7 +207,7 @@ HRESULT Seal(const std::shared_ptr<Segment>& segment)
     segment->closeResult = segment->prefix->Close();
     segment->sealed = true;
     if (FAILED(segment->closeResult))
-        LOG_ERROR("[DLSSNR_SPLIT] prefix Close failed hr=0x{:08X}; logical Close will fail", (UINT)segment->closeResult);
+        spdlog::error("{} [DLSSNR_SPLIT] prefix Close failed hr=0x{:08X}; logical Close will fail", __FUNCTION__, (UINT)segment->closeResult);
     return segment->closeResult;
 }
 
@@ -258,7 +258,7 @@ struct Route<Slot, P, Member, void(STDMETHODCALLTYPE Object::*)(Args...)>
                 static std::atomic<UINT64> routed {0};
                 const auto count = ++routed;
                 if (count <= 3 || count % 3000 == 0)
-                    LOG_INFO("[DLSSNR_SPLIT] indirect-routed={} signature=0x{:X} arguments={} compute={} postState=mirrored",
+                    spdlog::info("{} [DLSSNR_SPLIT] indirect-routed={} signature=0x{:X} arguments={} compute={} postState=mirrored", __FUNCTION__,
                              count, (uintptr_t)signature, info.count, info.compute != 0);
             }
             else
@@ -270,7 +270,7 @@ struct Route<Slot, P, Member, void(STDMETHODCALLTYPE Object::*)(Args...)>
                     static std::atomic<UINT64> fallbacks {0};
                     const auto count = ++fallbacks;
                     if (count <= 3 || count % 300 == 0)
-                        LOG_INFO("[DLSSNR_SPLIT] indirect-fallback={} signature=0x{:X} reason=missing-or-unsupported-signature",
+                        spdlog::info("{} [DLSSNR_SPLIT] indirect-fallback={} signature=0x{:X} reason=missing-or-unsupported-signature", __FUNCTION__,
                                  count, (uintptr_t)signature);
                 }
                 Hook::Forward(list, args...);
@@ -376,7 +376,7 @@ HRESULT STDMETHODCALLTYPE Query(ID3D12GraphicsCommandList* list, REFIID iid, voi
     {
         static std::atomic<UINT64> opaqueQueries {0};
         if (++opaqueQueries <= 16)
-            LOG_INFO("[DLSSNR_ASYNC_INTERFACE] list=0x{:X} type={} iid={:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X} policy=retain-opaque-recording",
+            spdlog::info("{} [DLSSNR_ASYNC_INTERFACE] list=0x{:X} type={} iid={:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X} policy=retain-opaque-recording", __FUNCTION__,
                 uintptr_t(list), UINT(list->GetType()), iid.Data1, iid.Data2, iid.Data3,
                 iid.Data4[0], iid.Data4[1], iid.Data4[2], iid.Data4[3], iid.Data4[4], iid.Data4[5], iid.Data4[6], iid.Data4[7]);
         DLSSNRPipelineAccess::Unknown(list, "opaque-command-interface");
@@ -552,7 +552,7 @@ std::shared_ptr<QueueSchedule> Schedule(ID3D12CommandQueue* queue)
 void Fail(QueueSchedule& s, HRESULT result, const char* operation)
 {
     s.failed = true;
-    LOG_ERROR("[DLSSNR_ASYNC] {} failed hr=0x{:08X}; further migration disabled for queue=0x{:X}",
+    spdlog::error("{} [DLSSNR_ASYNC] {} failed hr=0x{:08X}; further migration disabled for queue=0x{:X}", __FUNCTION__,
               operation, (UINT)result, (uintptr_t)s.queue.Get());
 }
 Dependency SubmitPoint(QueueSchedule& s, const DLSSNRPipelineAccess::Snapshot& footprint)
@@ -600,7 +600,7 @@ bool PrefixQueue(QueueSchedule& s)
         FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&s.prefixFence))))
     { s.prefixQueue.Reset(); return false; }
     s.prefixQueue->SetName(L"OptiScaler independent rendering prefix");
-    LOG_INFO("[DLSSNR_ASYNC] source=0x{:X} prefixQueue=0x{:X} mode=independent-prefix nr-and-native-fg-ownership=preserved",
+    spdlog::info("{} [DLSSNR_ASYNC] source=0x{:X} prefixQueue=0x{:X} mode=independent-prefix nr-and-native-fg-ownership=preserved", __FUNCTION__,
              (uintptr_t)s.queue.Get(), (uintptr_t)s.prefixQueue.Get());
     return true;
 }
@@ -629,7 +629,7 @@ HRESULT STDMETHODCALLTYPE Signal(ID3D12CommandQueue* queue, ID3D12Fence* fence, 
         if (record.observedValue && value < record.highest)
         {
             if (!record.opaque)
-                LOG_INFO("[DLSSNR_ASYNC_FENCE] fence=0x{:X} reason=nonmonotonic-signal value={} previousHighest={} scopes={}",
+                spdlog::info("{} [DLSSNR_ASYNC_FENCE] fence=0x{:X} reason=nonmonotonic-signal value={} previousHighest={} scopes={}", __FUNCTION__,
                     uintptr_t(fence), value, record.highest, record.values.size());
             if (!record.opaque) record.opaqueReason = "nonmonotonic-signal";
             record.opaque = true;
@@ -645,7 +645,7 @@ HRESULT STDMETHODCALLTYPE Signal(ID3D12CommandQueue* queue, ID3D12Fence* fence, 
             record.values.erase(value);
             static UINT64 duplicates = 0;
             if (++duplicates <= 3 || duplicates % 3000 == 0)
-                LOG_INFO("[DLSSNR_ASYNC_FENCE] fence=0x{:X} duplicate={} count={} policy=original-wait-for-this-value",
+                spdlog::info("{} [DLSSNR_ASYNC_FENCE] fence=0x{:X} duplicate={} count={} policy=original-wait-for-this-value", __FUNCTION__,
                     uintptr_t(fence), value, duplicates);
             return result;
         }
@@ -657,7 +657,7 @@ HRESULT STDMETHODCALLTYPE Signal(ID3D12CommandQueue* queue, ID3D12Fence* fence, 
             record.values.erase(record.values.begin());
             static UINT64 evictions = 0;
             if (++evictions <= 3 || evictions % 3000 == 0)
-                LOG_INFO("[DLSSNR_ASYNC_FENCE] fence=0x{:X} evicted={} count={} policy=retain-wait-for-missing-scope",
+                spdlog::info("{} [DLSSNR_ASYNC_FENCE] fence=0x{:X} evicted={} count={} policy=retain-wait-for-missing-scope", __FUNCTION__,
                     uintptr_t(fence), evicted, evictions);
         }
         if (auto source = Schedule(queue); source && !source->failed)
@@ -710,13 +710,13 @@ void AuditWait(UINT64 session, const DLSSNRPipelineAccess::Snapshot& prefix,
     const auto found = signals.find(wait.fence.Get());
     const bool observed = found != signals.end();
     const char* producer = !observed ? "unobserved-producer" : found->second.opaque ? found->second.opaqueReason : "queue-scopes";
-    LOG_INFO("[DLSSNR_AUDIT_WAIT] session={} role={} depth={} fence=0x{:X} requested={} completed={} producer={}",
+    spdlog::info("{} [DLSSNR_AUDIT_WAIT] session={} role={} depth={} fence=0x{:X} requested={} completed={} producer={}", __FUNCTION__,
         session, role, depth, uintptr_t(wait.fence.Get()), wait.value, completed, producer);
     if (!observed || found->second.opaque) return;
     const auto scope = found->second.values.find(wait.value);
     if (scope == found->second.values.end())
     {
-        LOG_INFO("[DLSSNR_AUDIT_WAIT] session={} fence=0x{:X} requested={} scope=missing-or-retired",
+        spdlog::info("{} [DLSSNR_AUDIT_WAIT] session={} fence=0x{:X} requested={} scope=missing-or-retired", __FUNCTION__,
             session, uintptr_t(wait.fence.Get()), wait.value);
         return;
     }
@@ -728,7 +728,7 @@ void AuditWait(UINT64 session, const DLSSNRPipelineAccess::Snapshot& prefix,
     }
     if (depth >= 16)
     {
-        LOG_INFO("[DLSSNR_AUDIT_WAIT] session={} truncated=wait-depth-limit", session);
+        spdlog::info("{} [DLSSNR_AUDIT_WAIT] session={} truncated=wait-depth-limit", __FUNCTION__, session);
         return;
     }
     for (const auto& dependency : scope->second.waits) AuditWait(session, prefix, dependency, "inherited", depth + 1, budget);
@@ -742,7 +742,7 @@ void AuditSchedule(QueueSchedule& source, UINT count, const std::vector<std::sha
     const auto desc = source.queue->GetDesc();
     ComPtr<ID3D12Device> device;
     const UINT deviceNodes = SUCCEEDED(source.queue->GetDevice(IID_PPV_ARGS(&device))) ? device->GetNodeCount() : 0;
-    LOG_INFO("[DLSSNR_AUDIT_SUBMIT] session={} source=0x{:X} lists={} segments={} exactCut={} failed={} queueType={} nodeMask={} deviceNodes={} priorPoints={} entryWaits={} previousFrameWaits={}",
+    spdlog::info("{} [DLSSNR_AUDIT_SUBMIT] session={} source=0x{:X} lists={} segments={} exactCut={} failed={} queueType={} nodeMask={} deviceNodes={} priorPoints={} entryWaits={} previousFrameWaits={}", __FUNCTION__,
         session, uintptr_t(source.queue.Get()), count, segments.size(), exact, source.failed,
         UINT(desc.Type), desc.NodeMask, deviceNodes, source.prior.size(), source.waits.size(), source.previousFrameWaits.size());
     for (const auto& point : source.prior)
@@ -752,7 +752,7 @@ void AuditSchedule(QueueSchedule& source, UINT count, const std::vector<std::sha
     for (const auto& wait : source.previousFrameWaits) AuditWait(session, parts[0], wait, "previous-frame-entry", 0, budget);
     if (source.precedingNrTail.fence)
         AuditWait(session, parts[0], {source.precedingNrTail.fence, source.precedingNrTail.value}, "prefix-lead-limit", 0, budget);
-    if (!budget) LOG_INFO("[DLSSNR_AUDIT_SUBMIT] session={} truncated=wait-node-limit", session);
+    if (!budget) spdlog::info("{} [DLSSNR_AUDIT_SUBMIT] session={} truncated=wait-node-limit", __FUNCTION__, session);
 }
 
 std::vector<FenceWait> Dependencies(QueueSchedule& source, const DLSSNRPipelineAccess::Snapshot& work)
@@ -795,10 +795,10 @@ void Decision(QueueSchedule& source, const char* kind, const char* reason)
     if (source.nrPendingAtDecision) ++source.pendingOutcomes[{kind, reason}];
     if (++source.decisions != 1 && source.decisions % 600 != 0) return;
     for (const auto& [key, count] : source.outcomes)
-        LOG_INFO("[DLSSNR_ASYNC_OUTCOME] source=0x{:X} decisions={} kind={} reason={} total={} pendingTotal={} counts=cumulative",
+        spdlog::info("{} [DLSSNR_ASYNC_OUTCOME] source=0x{:X} decisions={} kind={} reason={} total={} pendingTotal={} counts=cumulative", __FUNCTION__,
             uintptr_t(source.queue.Get()), source.decisions, key.first, key.second, count, source.pendingOutcomes[key]);
     for (const auto& [key, count] : source.blockers)
-        LOG_INFO("[DLSSNR_ASYNC_BLOCK] source=0x{:X} kind={} against={} cause={} total={} counts=cumulative-pending-only",
+        spdlog::info("{} [DLSSNR_ASYNC_BLOCK] source=0x{:X} kind={} against={} cause={} total={} counts=cumulative-pending-only", __FUNCTION__,
             uintptr_t(source.queue.Get()), std::get<0>(key), std::get<1>(key), std::get<2>(key), count);
 }
 
@@ -832,7 +832,7 @@ bool AdvanceRenderBatch(QueueSchedule& source, const std::vector<ID3D12CommandLi
         Decision(source, "render-batch", reason);
         static UINT64 serialBatches = 0;
         if (++serialBatches <= 3 || serialBatches % 600 == 0)
-            LOG_INFO("[DLSSNR_ASYNC_BATCH] serial={} lists={} reason={} dependencies={} nrOwner=true",
+            spdlog::info("{} [DLSSNR_ASYNC_BATCH] serial={} lists={} reason={} dependencies={} nrOwner=true", __FUNCTION__,
                 serialBatches, expanded.size(), reason, required.size());
         return false;
     }
@@ -864,7 +864,7 @@ bool AdvanceRenderBatch(QueueSchedule& source, const std::vector<ID3D12CommandLi
     ++asyncSubmissions;
     Decision(source, "render-batch", "advance");
     if (asyncSubmissions <= 3 || asyncSubmissions % 300 == 0)
-        LOG_INFO("[DLSSNR_ASYNC] advance={} kind=render-batch source=0x{:X} prefix=0x{:X} lists={} dependencies={} previousNrPending={} join=original-queue cpu-submit-not-gpu-overlap-proof",
+        spdlog::info("{} [DLSSNR_ASYNC] advance={} kind=render-batch source=0x{:X} prefix=0x{:X} lists={} dependencies={} previousNrPending={} join=original-queue cpu-submit-not-gpu-overlap-proof", __FUNCTION__,
             asyncSubmissions, uintptr_t(source.queue.Get()), uintptr_t(source.prefixQueue.Get()), expanded.size(), required.size(), pendingNr);
     return true;
 }
@@ -918,7 +918,7 @@ bool Submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* ori
         NrTail(*source, SubmitPoint(*source, DLSSNRPipelineAccess::Combine(parts)));
         ++serialSubmissions;
         if (serialSubmissions <= 3 || serialSubmissions % 300 == 0)
-            LOG_INFO("[DLSSNR_ASYNC] serial={} frame={} reason={} tailReason={} mode=original-batch",
+            spdlog::info("{} [DLSSNR_ASYNC] serial={} frame={} reason={} tailReason={} mode=original-batch", __FUNCTION__,
                      serialSubmissions, segments.front()->serial,
                      prefixRestriction,
                      DLSSNRPipelineAccess::Complete(tail) ? "complete" : DLSSNRPipelineAccess::Reason(tail));
@@ -969,7 +969,7 @@ bool Submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* ori
         source->prior.push_back({source->prefixFence, value, prefix});
         ++asyncSubmissions;
         if (asyncSubmissions <= 3 || asyncSubmissions % 300 == 0)
-            LOG_INFO("[DLSSNR_ASYNC] advance={} kind=nr-prefix frame={} source=0x{:X} prefix=0x{:X} dependencies={} previousNrPending={} join=before-current-nr cpu-submit-not-gpu-overlap-proof",
+            spdlog::info("{} [DLSSNR_ASYNC] advance={} kind=nr-prefix frame={} source=0x{:X} prefix=0x{:X} dependencies={} previousNrPending={} join=before-current-nr cpu-submit-not-gpu-overlap-proof", __FUNCTION__,
                      asyncSubmissions, segments.front()->serial, (uintptr_t)queue, (uintptr_t)source->prefixQueue.Get(), required.size(), pendingNr);
     }
     else
@@ -980,7 +980,7 @@ bool Submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* ori
         SubmitPoint(*source, prefix);
         ++serialSubmissions;
         if (serialSubmissions <= 3 || serialSubmissions % 300 == 0)
-            LOG_INFO("[DLSSNR_ASYNC] serial={} frame={} reason={} tailReason={} dependencies={}", serialSubmissions,
+            spdlog::info("{} [DLSSNR_ASYNC] serial={} frame={} reason={} tailReason={} dependencies={}", __FUNCTION__, serialSubmissions,
                      segments.front()->serial, fallback,
                      DLSSNRPipelineAccess::Complete(tail) ? "complete" : DLSSNRPipelineAccess::Reason(tail), required.size());
     }
@@ -1046,14 +1046,14 @@ void STDMETHODCALLTYPE Execute(ID3D12CommandQueue* queue, UINT count, ID3D12Comm
         if (FAILED(signal))
         {
             disabled = true; // Keep all affected objects; never guess completion.
-            LOG_ERROR("[DLSSNR_SPLIT] retirement Signal failed hr=0x{:08X}; new recordings disabled", (UINT)signal);
+            spdlog::error("{} [DLSSNR_SPLIT] retirement Signal failed hr=0x{:08X}; new recordings disabled", __FUNCTION__, (UINT)signal);
         }
         ++submissions;
         if (submissions <= 3 || submissions % 300 == 0)
         {
             const auto nrSegments = std::count_if(lifetime->segments.begin(), lifetime->segments.end(),
                 [](const auto& segment) { return segment->nrBoundary; });
-            LOG_INFO("[DLSSNR_SPLIT] submit={} queue=0x{:X} inputLists={} expandedLists={} segments={} nrSegments={} mode={}",
+            spdlog::info("{} [DLSSNR_SPLIT] submit={} queue=0x{:X} inputLists={} expandedLists={} segments={} nrSegments={} mode={}", __FUNCTION__,
                      submissions, (uintptr_t)queue, count, expanded.size(), lifetime->segments.size(), nrSegments,
                      DLSSNRPipelineAccess::Enabled() ? "dependency-scheduled" : "serial-same-batch");
         }
@@ -1180,7 +1180,7 @@ HRESULT STDMETHODCALLTYPE CreateSignature(ID3D12Device* device, const D3D12_COMM
     static std::atomic<UINT64> signatures {0};
     const auto count = ++signatures;
     if (count <= 8 || count % 300 == 0 || FAILED(stored))
-        LOG_INFO("[DLSSNR_SPLIT] indirect-signature={} object=0x{:X} arguments={} compute={} supported={} metadataHr=0x{:08X}",
+        spdlog::info("{} [DLSSNR_SPLIT] indirect-signature={} object=0x{:X} arguments={} compute={} supported={} metadataHr=0x{:08X}", __FUNCTION__,
                  count, (uintptr_t)native, info.count, info.compute != 0, info.supported != 0, (UINT)stored);
     return result; // Never change the game's creation result or descriptor.
 }
@@ -1197,7 +1197,7 @@ void QueueCreated(HRESULT result, void** output)
             schedulerReady = false;
             std::lock_guard lock(mutex);
             disabled = true;
-            LOG_ERROR("[DLSSNR_SPLIT] new queue hook unavailable; disabling future recordings");
+            spdlog::error("{} [DLSSNR_SPLIT] new queue hook unavailable; disabling future recordings", __FUNCTION__);
         }
     }
 }
@@ -1243,7 +1243,7 @@ NativeRecording::NativeRecording(ID3D12GraphicsCommandList* commands, const NVSD
     static std::atomic<UINT64> calls {0};
     const auto count = ++calls;
     if (count <= 3 || count % 300 == 0)
-        LOG_INFO("[DLSSNR_SPLIT] native-prefix={} logical=0x{:X} physical=0x{:X} scope=whole-sdk-call",
+        spdlog::info("{} [DLSSNR_SPLIT] native-prefix={} logical=0x{:X} physical=0x{:X} scope=whole-sdk-call", __FUNCTION__,
                  count, (uintptr_t)native, (uintptr_t)target);
     DLSSNRPipelineTrace::Mark("native-prefix-record", native, target, count);
 }
@@ -1319,7 +1319,7 @@ bool Observe(ID3D12GraphicsCommandList* commands)
         // prevent future routing with an unproven observer order.
         if (!hooksReady) { disabled = true; schedulerReady = false; }
     }
-    LOG_INFO("[DLSSNR_SPLIT] command implementation=0x{:X} version={} ready={} routingHooks={} type={} observerOrder=logical-before-routing",
+    spdlog::info("{} [DLSSNR_SPLIT] command implementation=0x{:X} version={} ready={} routingHooks={} type={} observerOrder=logical-before-routing", __FUNCTION__,
              (uintptr_t)table, version, ready, hooksReady, (UINT)commands->GetType());
     return ready;
 }
@@ -1333,7 +1333,7 @@ void Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* probe)
         {
             enabled = Config::Instance()->DLSSNRPipelineSplit.value_or_default();
             initialized = true;
-            LOG_INFO("[DLSSNR_SPLIT] startup enabled={} lateHudless={} trace={} restartRequired=true asyncRequested={}",
+            spdlog::info("{} [DLSSNR_SPLIT] startup enabled={} lateHudless={} trace={} restartRequired=true asyncRequested={}", __FUNCTION__,
                      enabled.load(), Config::Instance()->DLSSNRLateHudless.value_or_default(),
                      Config::Instance()->DLSSNRPipelineDebug.value_or_default(),
                      Config::Instance()->DLSSNRPipelineAsync.value_or_default());
@@ -1347,7 +1347,7 @@ void Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* probe)
         Internal guard;
         auto** deviceTable = *reinterpret_cast<void***>(device);
         const bool signaturesReady = CreateSignatureHook::Install(deviceTable[41], CreateSignature) == NO_ERROR;
-        LOG_INFO("[DLSSNR_SPLIT] indirect-signature hook ready={} policy=signature-aware-post-state", signaturesReady);
+        spdlog::info("{} [DLSSNR_SPLIT] indirect-signature hook ready={} policy=signature-aware-post-state", __FUNCTION__, signaturesReady);
         bool creatorsReady = CreateQueueHook::Install(deviceTable[8], CreateQueue) == NO_ERROR;
         ComPtr<ID3D12Device9> device9;
         if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device9))))
@@ -1372,7 +1372,7 @@ void Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* probe)
             std::lock_guard lock(mutex);
             queueReady = installed && creatorsReady;
             DLSSNRPipelineAccess::TileTrackingReady(queueReady);
-            LOG_INFO("[DLSSNR_SPLIT] queue hooks ready={} execute={} creators={}", queueReady, installed, creatorsReady);
+            spdlog::info("{} [DLSSNR_SPLIT] queue hooks ready={} execute={} creators={}", __FUNCTION__, queueReady, installed, creatorsReady);
         }
     }
     ID3D12GraphicsCommandList* nativeList = nullptr;
@@ -1381,7 +1381,7 @@ void Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* probe)
     {
         std::lock_guard lock(mutex);
         schedulerReady = DLSSNRPipelineAccess::Enabled() && queueReady && !disabled;
-        LOG_INFO("[DLSSNR_ASYNC] startup enabled={} split={} access={} queueHooks={} restartRequired=true",
+        spdlog::info("{} [DLSSNR_ASYNC] startup enabled={} split={} access={} queueHooks={} restartRequired=true", __FUNCTION__,
                  schedulerReady.load(), enabled.load(), DLSSNRPipelineAccess::Enabled(), queueReady);
     }
 }
@@ -1408,7 +1408,7 @@ bool BeforeNR(ID3D12GraphicsCommandList* commands, ID3D12Resource* scene, UINT64
             auto& count = segment ? earlyBoundaries : missingBoundaries;
             ++count;
             if (count <= 3 || count % 300 == 0)
-                LOG_INFO("[DLSSNR_SPLIT] nr-boundary-unavailable frame={} cmd=0x{:X} reason={} earlierMethodSlot={} count={} queueReady={} disabled={} candidate={} opaque={} recordings={} retired={}",
+                spdlog::info("{} [DLSSNR_SPLIT] nr-boundary-unavailable frame={} cmd=0x{:X} reason={} earlierMethodSlot={} count={} queueReady={} disabled={} candidate={} opaque={} recordings={} retired={}", __FUNCTION__,
                          serial, (uintptr_t)commands, segment ? "sealed-before-nr" : "recording-not-armed",
                          segment ? segment->sealSlot : 0, count, queueReady, disabled, candidates.contains(commands),
                          opaqueLists.contains(commands), recordings.size(), retired.size());
@@ -1424,7 +1424,7 @@ bool BeforeNR(ID3D12GraphicsCommandList* commands, ID3D12Resource* scene, UINT64
         std::lock_guard lock(mutex);
         ++cuts;
         if (cuts <= 3 || cuts % 300 == 0)
-            LOG_INFO("[DLSSNR_SPLIT] nr-boundary={} frame={} prefix=0x{:X} tail=0x{:X} scene=0x{:X}",
+            spdlog::info("{} [DLSSNR_SPLIT] nr-boundary={} frame={} prefix=0x{:X} tail=0x{:X} scene=0x{:X}", __FUNCTION__,
                      cuts, serial, (uintptr_t)segment->prefix.Get(), (uintptr_t)commands, (uintptr_t)scene);
     }
     DLSSNRPipelineTrace::Mark("nr-prefix-sealed", commands, segment->prefix.Get(), serial);
