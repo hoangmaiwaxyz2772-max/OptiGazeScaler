@@ -1,0 +1,79 @@
+name: Build and publish hotfix
+
+on:
+  push:
+    tags:
+      - 'v*-dlss5-hotfix*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-hotfix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Validate release inputs
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v[0-9.]+-pre[0-9]+-dlss5-hotfix[0-9]+$') {
+            throw 'Unexpected release tag'
+          }
+          if (-not (Test-Path ".github/releases/$env:GITHUB_REF_NAME.md")) {
+            throw 'Approved release notes are missing'
+          }
+          git rev-parse HEAD
+          git submodule status
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build Windows x64 Release
+        run: |
+          msbuild OptiScaler.sln /m:2 /p:Configuration=Release /p:Platform=x64 /v:minimal /fl /flp:logfile=build-release.log
+          if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
+      - name: Package and verify release assets
+        run: ./.github/scripts/package-release.ps1 -Tag $env:GITHUB_REF_NAME
+      - name: Save build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotfix-build-log
+          path: build-release.log
+          if-no-files-found: ignore
+      - name: Upload and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = $tag -replace '^v', '' -replace '-dlss5-hotfix', ' Hotfix '
+          $title = "OptiGazeScaler $version — HUDless Capture and CPU Performance Fixes"
+          $files = @(Get-ChildItem release-assets -File)
+          if ($files.Count -ne 3) { throw 'Expected ZIP, DLL and checksum file' }
+          # Creating a new draft fails if the tag already has a release. Never
+          # overwrite an existing release or expose a partially uploaded one.
+          gh release create $tag --verify-tag --draft --prerelease --title $title --notes-file ".github/releases/$tag.md" @($files.FullName)
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
+          $json = gh release view $tag --json assets,isDraft
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify uploaded assets' }
+          $release = $json | ConvertFrom-Json
+          if (-not $release.isDraft -or $release.assets.Count -ne 3) { throw 'Unexpected draft assets' }
+          foreach ($file in $files) {
+            $asset = @($release.assets | Where-Object name -EQ $file.Name)
+            if ($asset.Count -ne 1 -or $asset[0].size -ne $file.Length -or $asset[0].state -ne 'uploaded') {
+              throw "Uploaded asset mismatch: $($file.Name)"
+            }
+            $digest = 'sha256:' + (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($asset[0].digest -ne $digest) { throw "Uploaded checksum mismatch: $($file.Name)" }
+          }
+          gh release edit $tag --draft=false
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
