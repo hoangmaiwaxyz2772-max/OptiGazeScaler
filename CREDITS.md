@@ -11,7 +11,9 @@ Existing third-party notices and licenses remain applicable to their components.
 Thank you to **Dagherbou** and the contributors to
 [OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR), particularly
 the `dlss-neural-rendering` branch, for their DLSS NR integration and
-exposure/white-point work used as a reference for the adaptation in this fork.
+exposure/white-point work. This fork's automatic-exposure path was implemented
+with reference to their game-exposure-texture reading and white-point handling
+approach, with adaptations for this project's NR pipeline.
 
 The local reference checkout is pinned to
 [`393e0706b950a0ff1498e9dcf66989a80de72f31`](https://github.com/Dagherbou/OptiScaler_DLSSNR/tree/393e0706b950a0ff1498e9dcf66989a80de72f31).
@@ -19,16 +21,18 @@ Its NR processing is in `OptiScaler/dlssnr/DlssNrFeature_Dx12.cpp`, with
 conversion/composition in `OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl`.
 The earlier white-point metering work is recorded in
 [`64b02a6f`](https://github.com/Dagherbou/OptiScaler_DLSSNR/commit/64b02a6f).
-These references identify the work consulted, not a claim of verbatim copying
-or an exact line-by-line import revision.
+These references record consulted source snapshots and related work; they do
+not identify the exact revision of every approach consulted during development
+or a line-by-line import revision. In particular, the earlier image-metering
+work should not be read as the sole source of the automatic-exposure adaptation.
 
 The corresponding implementation here is in
 [`DLSSNRFeature_Dx12.cpp`](OptiScaler/upscalers/dlssnr/DLSSNRFeature_Dx12.cpp),
 at the NGX exposure-resource acquisition and `EffectivePaperWhite()` shader
 helper. This fork samples the game's exposure texture on the GPU and derives
 reference white from `PreExposure * ExposureScale / ExposureTexture`, with
-finite-value checks, bounds and a manual-white fallback. The reference branch's
-image-brightness meter is not part of this path. The HUDfix display-image route
+finite-value checks, bounds and a manual-white fallback. These details describe
+the current adaptation of the referenced exposure-texture approach. The HUDfix display-image route
 does not use game exposure. ROI extrapolation is a separate algorithm.
 
 OptiScaler_DLSSNR carries the GNU GPL version 3 license. The adapted project

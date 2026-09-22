@@ -2474,12 +2474,13 @@ float LogTransferRange()
     return log2(1.0 + HdrHeadroom * LogInputScale);
 }
 
-// Exposure/white-point work adapted with reference to Dagherbou's OptiScaler_DLSSNR
-// (dlss-neural-rendering, reference 393e0706b950a0ff1498e9dcf66989a80de72f31).
+// Adapted with reference to the game-exposure-texture reading and white-point
+// handling approach in Dagherbou's OptiScaler_DLSSNR (dlss-neural-rendering).
+// Consulted snapshot: 393e0706b950a0ff1498e9dcf66989a80de72f31; see CREDITS.md
+// for the scope of this reference, which is not an exact import revision.
 // Thank you to Dagherbou and the OptiScaler contributors. See
 // Licenses/OptiScaler_DLSSNR_ATTRIBUTION.txt for source links and GPL-3.0 terms.
-// This fork uses the live NGX exposure ratio, validation and manual fallback;
-// it does not use the reference branch's frame-brightness meter.
+// This adaptation uses the live NGX exposure ratio, validation and manual fallback.
 float EffectivePaperWhite()
 {
     float paperWhite = clamp(PaperWhite, 0.001, MaxFp16Value);
@@ -7124,10 +7125,11 @@ bool DLSSNRFeatureDx12::Evaluate(ID3D12Device* device, ID3D12GraphicsCommandList
         LOG_INFO("[DLSSNR_COLOR] HUDless HDR input paper white={:.1f} nits; reset history",
                  hudlessHDRPaperWhiteNits);
     }
-    // Exposure/white-point adaptation credit: Dagherbou and OptiScaler_DLSSNR
+    // Exposure-texture reading / white-point adaptation: referenced the approach
+    // in OptiScaler_DLSSNR. Credit to Dagherbou and the OptiScaler_DLSSNR
     // contributors, https://github.com/Dagherbou/OptiScaler_DLSSNR.
     // See Licenses/OptiScaler_DLSSNR_ATTRIBUTION.txt for the pinned reference
-    // and differences: this path reads live NGX exposure rather than metering RGB.
+    // and adaptation scope of this live NGX exposure-texture path.
     // NGX exposes the game's exposure independently from the color buffer. Keep
     // the pointer for the transfer shader so it can sample the current frame
     // directly, avoiding a CPU readback delay. Invalid/missing resources simply

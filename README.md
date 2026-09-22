@@ -35,7 +35,7 @@ The existing [DLSS gaze ROI](docs/GazeROI.md) and FSR frame-generation ROI featu
 
 ## Acknowledgements
 
-Thank you to the OptiScaler authors and contributors, and to **Dagherbou** and the contributors to [OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) for their NR integration and exposure/white-point work used as a reference for this fork's adaptation. The current automatic-exposure path samples the game's exposure texture directly; it is not a copy of their image-metering algorithm. Source references, adaptation scope and license notices are in [CREDITS.md](CREDITS.md).
+Thank you to the OptiScaler authors and contributors, and to **Dagherbou** and the contributors to [OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) for their NR integration and exposure/white-point work. This fork's automatic-exposure path was implemented with reference to OptiScaler_DLSSNR's game-exposure-texture reading and white-point handling approach, with adaptations for this project's NR pipeline. Source references, adaptation scope and license notices are in [CREDITS.md](CREDITS.md).
 
 The following sections retain the upstream OptiScaler overview and installation information. Their upstream download links do not provide this fork's DLSS5/gaze features.
 

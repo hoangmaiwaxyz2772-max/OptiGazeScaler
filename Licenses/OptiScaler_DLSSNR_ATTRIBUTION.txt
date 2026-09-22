@@ -10,7 +10,9 @@ License: GNU General Public License, version 3 (see the accompanying LICENSE)
 
 Thank you to Dagherbou, the OptiScaler_DLSSNR contributors and the original
 OptiScaler contributors for their NR integration and exposure/white-point work.
-That work was used as a reference for this fork's adaptation.
+This fork's automatic-exposure path was implemented with reference to their
+game-exposure-texture reading and white-point handling approach, with
+adaptations for this project's NR pipeline.
 
 Reference files:
   OptiScaler/dlssnr/DlssNrFeature_Dx12.cpp
@@ -22,9 +24,11 @@ Adaptation in OptiGazeScaler:
 
 This is a modified implementation. It reads the live NGX exposure texture on
 the GPU and uses PreExposure * ExposureScale / ExposureTexture, with invalid
-input checks and a manual-white fallback. It does not use the reference
-branch's image-brightness meter. The pinned checkout records the consulted
-source, not an exact verbatim import revision. The current HUDfix display-image
+input checks and a manual-white fallback. These details describe the current
+adaptation of the referenced exposure-texture approach. The pinned checkout
+and earlier white-point commit record consulted source snapshots and related
+work, not the exact revision of every approach consulted during development
+or a line-by-line import revision. The current HUDfix display-image
 route and ROI edge-extrapolation algorithm are separate from this adaptation.
 
 This notice was added on 2026-09-20. The project remains under GPL version 3;
