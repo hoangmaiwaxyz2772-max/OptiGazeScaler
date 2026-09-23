@@ -4,6 +4,7 @@
 #include <atomic>
 #include <bit>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -62,7 +63,7 @@ struct Root
 {
     Kind kind = Kind::None;
     UINT64 value = 0;
-    RootConstants constants;
+    std::shared_ptr<RootConstants> constants;
 };
 struct BindPoint
 {
@@ -111,7 +112,7 @@ struct State
                     else list->SetGraphicsRootUnorderedAccessView(index, root.value);
                     break;
                 case Kind::Constants:
-                    root.constants.Restore(list, cs, index);
+                    if (root.constants) root.constants->Restore(list, cs, index);
                     break;
                 default: break;
                 }
@@ -164,7 +165,8 @@ inline void Value(ID3D12GraphicsCommandList* list, bool cs, UINT index, Kind kin
     if (suppress) return;
     std::lock_guard lock(mutex);
     auto& point = cs ? states[list].compute : states[list].graphics;
-    point.roots[index] = {kind, value, {}};
+    auto& root = point.roots[index];
+    root = {kind, value, {}};
 }
 inline void Constants(ID3D12GraphicsCommandList* list, bool cs, UINT index, UINT count,
                       const void* data, UINT offset)
@@ -173,9 +175,13 @@ inline void Constants(ID3D12GraphicsCommandList* list, bool cs, UINT index, UINT
     std::lock_guard lock(mutex);
     auto& point = cs ? states[list].compute : states[list].graphics;
     auto& root = point.roots[index];
-    if (root.kind != Kind::Constants) root = {};
-    root.kind = Kind::Constants;
-    root.constants.Set(offset, count, static_cast<const UINT*>(data));
+    if (root.kind != Kind::Constants)
+    {
+        root = {Kind::Constants, 0, std::make_shared<RootConstants>()};
+    }
+    else if (root.constants.use_count() != 1)
+        root.constants = std::make_shared<RootConstants>(*root.constants);
+    root.constants->Set(offset, count, static_cast<const UINT*>(data));
 }
 inline void RenderPass(ID3D12GraphicsCommandList* list, bool active)
 {

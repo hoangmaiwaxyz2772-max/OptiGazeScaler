@@ -2,7 +2,6 @@
 #include "DLSSNRFeature_Dx12.h"
 #include "DLSSNRPreview.h"
 #include "DLSSNRLatePass.h"
-#include "DLSSNRPipelineTrace.h"
 #include "DLSSNRExtrapolation.h"
 #include <DLSSNRExtrapolationShaders.h>
 
@@ -6982,7 +6981,6 @@ bool DLSSNRFeatureDx12::Evaluate(ID3D12Device* device, ID3D12GraphicsCommandList
                                  const FoveatedRegion* foveatedRegion, ColorDomain domain, std::optional<uint32_t> lifetimeSlot,
                                  ID3D12Resource** lateOutput)
 {
-    DLSSNRPipelineTrace::Poll(device);
     if (lateOutput) *lateOutput = nullptr;
     if (domain == ColorDomain::Scene && Config::Instance()->DLSSNRLateHudless.value_or_default())
         return DLSSNRLatePass::Stage(this, device, commandList, parameters, outputWidth, outputHeight,
@@ -7012,7 +7010,6 @@ bool DLSSNRFeatureDx12::Evaluate(ID3D12Device* device, ID3D12GraphicsCommandList
         return false;
     }
     const auto gameOutputDesc = gameOutput->GetDesc();
-    DLSSNRPipelineTrace::Mark("nr-record-boundary", commandList, gameOutput, static_cast<UINT>(domain));
     std::string colorContractReason;
     if (!IsSupportedColor(device, gameOutputDesc, colorContractReason))
     {
@@ -8199,9 +8196,7 @@ bool DLSSNRFeatureDx12::Evaluate(ID3D12Device* device, ID3D12GraphicsCommandList
                               nrColorBaseX, nrColorBaseY, nrWidth, nrHeight, 1);
     }
     const auto evaluateStart = std::chrono::steady_clock::now();
-    DLSSNRPipelineTrace::Mark("ngx-nr-record-enter", commandList, nrColor);
     const NVSDK_NGX_Result result = _evaluateFeature(commandList, _handle, nrParameters, nullptr);
-    DLSSNRPipelineTrace::Mark("ngx-nr-record-return", commandList, nullptr, static_cast<UINT>(result));
     const double evaluateCpuMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - evaluateStart).count();
     if (result != NVSDK_NGX_Result_Success)

@@ -1,6 +1,5 @@
 #include "pch.h"
 #include <upscalers/dlssnr/DLSSNRLatePass.h>
-#include <upscalers/dlssnr/DLSSNRDiagnostics.h>
 #include <upscalers/dlssnr/DLSSNRCommandState.h>
 #include "Hudfix_Dx12.h"
 
@@ -279,8 +278,6 @@ bool Hudfix_Dx12::CheckCapture()
 
         if (_captureCounter[fIndex] > 999)
         {
-            if (DLSSNRLatePass::Pending())
-                DLSSNR_DIAG("capture-limit", "reason=already-captured slot={} count={} upscale={}", fIndex, _captureCounter[fIndex], _upscaleCounter);
             LOG_DEBUG("_captureCounter[{}] > 999", fIndex);
             return false;
         }
@@ -292,9 +289,6 @@ bool Hudfix_Dx12::CheckCapture()
 
         if (_captureCounter[fIndex] < Config::Instance()->FGHUDLimit.value_or_default())
         {
-            if (DLSSNRLatePass::Pending())
-                DLSSNR_DIAG("capture-limit", "reason=below-selection-limit slot={} count={} limit={} upscale={}",
-                    fIndex, _captureCounter[fIndex], Config::Instance()->FGHUDLimit.value_or_default(), _upscaleCounter);
             return false;
         }
     }
@@ -342,32 +336,16 @@ inline static std::string GetDispatchString(UINT source)
 
 bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
 {
-    auto reject = [&](unsigned reason, const char* name)
-    {
-        if (!DLSSNRLatePass::Pending()) return false;
-        static DLSSNRDiagnostics::Gate gates[7];
-        if (gates[reason].Sample())
-        {
-            const auto desc = resource && resource->buffer ? resource->buffer->GetDesc() : D3D12_RESOURCE_DESC {};
-            const auto sc = State::Instance().currentSwapchainDesc.BufferDesc;
-            LOG_INFO("[DLSSNR_DIAG][resource-reject] reason={} res=0x{:X} stored={}x{} actual={}x{} format={}/{} flags=0x{:X} source=0x{:X} swapchain={}x{} relaxed={} extended={} upscale={}",
-                name, resource ? (uintptr_t)resource->buffer : 0, resource ? resource->width : 0,
-                resource ? resource->height : 0, desc.Width, desc.Height, (UINT)desc.Format, (UINT)sc.Format,
-                (UINT)desc.Flags, resource ? resource->captureInfo : 0, sc.Width, sc.Height,
-                Config::Instance()->FGRelaxedResolutionCheck.value_or_default(), Config::Instance()->FGHUDFixExtended.value_or_default(), _upscaleCounter);
-        }
-        return false;
-    };
     if (resource == nullptr || resource->buffer == nullptr || State::Instance().isShuttingDown)
     {
         // LOG_TRACE("Resource is null or shutting down!");
-        return reject(0, "null-resource-or-shutdown");
+        return false;
     }
 
     if (State::Instance().fgOnlyUseCapturedResources)
     {
         auto result = _captureList.find(resource->buffer) != _captureList.end();
-        return result || reject(1, "not-in-user-captured-list");
+        return result;
     }
 
     auto& s = State::Instance();
@@ -379,7 +357,7 @@ bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
     if (resource->width == 0 || resource->height == 0)
     {
         // LOG_TRACE("Resource has invalid dimensions!");
-        return reject(2, "zero-stored-size");
+        return false;
     }
 
     // Get resource info
@@ -403,7 +381,7 @@ bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
             // LOG_TRACE("Resource dimensions do not match! Resource: {}x{}, Swapchain: {}x{}", resDesc.Width,
             //           resDesc.Height, width, height);
 
-            return reject(3, "resolution");
+            return false;
         }
 
         resource->extended = true;
@@ -417,7 +395,7 @@ bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
     {
         // LOG_TRACE("Resource has unsupported flags! Flags: {:X}", (UINT) resDesc.Flags);
 
-        return reject(4, "resource-flags");
+        return false;
     }
 
     std::string caller;
@@ -443,7 +421,7 @@ bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
         //     GetSourceString(source), GetDispatchString(dispatcher), (UINT) resDesc.Format,
         //     (UINT) s.currentSwapchainDesc.BufferDesc.Format, (size_t) resource->buffer);
 
-        return reject(5, "format-extended-disabled");
+        return false;
     }
 
     {
@@ -619,10 +597,6 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
     auto& s = State::Instance();
 
     const bool latePending = DLSSNRLatePass::Pending();
-    if (latePending && !DLSSNRCommandState::suppress)
-        DLSSNR_DIAG("hud-check", "cmd=0x{:X} res=0x{:X} source=0x{:X} state=0x{:X} active={} upscale={} present={}",
-            (uintptr_t)cmdList, resource ? (uintptr_t)resource->buffer : 0, resource ? resource->captureInfo : 0,
-            (UINT)state, IsResourceCheckActive(), _upscaleCounter, _fgCounter);
     const bool captureForFG = s.currentFG != nullptr && s.currentFG->IsActive() &&
         Config::Instance()->FGEnabled.value_or_default() && Config::Instance()->FGHUDFix.value_or_default();
     if ((!captureForFG && !latePending) || DLSSNRCommandState::suppress)
@@ -650,8 +624,6 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
 
             if (!capturedHudlessInfo->enabled)
             {
-                if (latePending)
-                    DLSSNR_DIAG("hud-reject", "reason=user-disabled res=0x{:X}", (uintptr_t)resource->buffer);
                 LOG_DEBUG("Skipping {:X}, disabled from captured hudless list!", (size_t) resource->buffer);
                 break;
             }
@@ -724,9 +696,6 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                 // directly ignore
                 if (info->ignore)
                 {
-                    if (latePending)
-                        DLSSNR_DIAG("hud-reject", "reason=resource-blocked res=0x{:X} dontReuse={} retryCount={}",
-                            (uintptr_t)resource->buffer, info->dontReuse, info->retryCount);
                     break;
                 }
 
@@ -768,8 +737,6 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
         {
             if (state == D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE)
                 return false; // legacy skip-state sentinel is not a usable writeback contract
-            DLSSNR_DIAG("hud-selected", "cmd=0x{:X} res=0x{:X} source=0x{:X} state=0x{:X} upscale={}",
-                (uintptr_t)cmdList, (uintptr_t)resource->buffer, resource->captureInfo, (UINT)state, _upscaleCounter);
             const bool processed = DLSSNRLatePass::Process(cmdList, resource->buffer, state);
             if (!processed && DLSSNRLatePass::Pending()) return false;
             if (!captureForFG)

@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "input_system_internal.h"
 
+#include <hooks/Kernel_Hooks.h>
+
 #include <algorithm>
 #include <cwctype>
 #include <string>
@@ -43,9 +45,11 @@ void LoadHidApi()
     if (hid == nullptr)
         return;
 
-    hidGetPreparsedData = reinterpret_cast<HidD_GetPreparsedData_t>(GetProcAddress(hid, "HidD_GetPreparsedData"));
-    hidFreePreparsedData = reinterpret_cast<HidD_FreePreparsedData_t>(GetProcAddress(hid, "HidD_FreePreparsedData"));
-    hidGetCaps = reinterpret_cast<HidP_GetCaps_t>(GetProcAddress(hid, "HidP_GetCaps"));
+    hidGetPreparsedData =
+        reinterpret_cast<HidD_GetPreparsedData_t>(KernelBaseProxy::GetProcAddress_()(hid, "HidD_GetPreparsedData"));
+    hidFreePreparsedData =
+        reinterpret_cast<HidD_FreePreparsedData_t>(KernelBaseProxy::GetProcAddress_()(hid, "HidD_FreePreparsedData"));
+    hidGetCaps = reinterpret_cast<HidP_GetCaps_t>(KernelBaseProxy::GetProcAddress_()(hid, "HidP_GetCaps"));
 }
 
 std::wstring ToLowerCopy(std::wstring text)
@@ -72,8 +76,14 @@ std::wstring AnsiToWide(LPCSTR text)
     if (length <= 1)
         return {};
 
-    std::wstring result(static_cast<std::size_t>(length - 1), L'\0');
-    MultiByteToWideChar(CP_ACP, 0, text, -1, &result[0], length);
+    // MultiByteToWideChar includes the terminating NUL when cbMultiByte == -1.
+    // Allocate room for it, then remove it from the returned std::wstring.
+    std::wstring result(static_cast<std::size_t>(length), L'\0');
+
+    if (MultiByteToWideChar(CP_ACP, 0, text, -1, result.data(), length) != length)
+        return {};
+
+    result.resize(static_cast<std::size_t>(length - 1));
     return result;
 }
 
@@ -392,12 +402,15 @@ BOOL WINAPI hkDeviceIoControl(HANDLE device, DWORD controlCode, LPVOID inBuffer,
 
 BOOL WINAPI hkCloseHandle(HANDLE handle)
 {
+    const BOOL result = o_CloseHandle(handle);
+
+    if (result)
     {
         std::unique_lock lock(_state.Mutex);
         ClearHidHandleLocked(handle);
     }
 
-    return o_CloseHandle(handle);
+    return result;
 }
 
 } // namespace OptiInput

@@ -56,7 +56,7 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $version = $tag -replace '^v', '' -replace '-dlss5-hotfix', ' Hotfix '
-          $title = "OptiGazeScaler $version — HUDless Capture and CPU Performance Fixes"
+          $title = "OptiGazeScaler $version — HUDless and HDR CPU Performance Fixes"
           $files = @(Get-ChildItem release-assets -File)
           if ($files.Count -ne 3) { throw 'Expected ZIP, DLL and checksum file' }
           # Creating a new draft fails if the tag already has a release. Never

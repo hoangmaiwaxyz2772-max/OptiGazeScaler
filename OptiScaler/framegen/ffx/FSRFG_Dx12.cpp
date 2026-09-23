@@ -1,5 +1,4 @@
 #include "pch.h"
-#include <upscalers/dlssnr/DLSSNRPipelineTrace.h>
 
 #include "FSRFG_Dx12.h"
 #include <State.h>
@@ -1695,7 +1694,6 @@ bool FSRFG_Dx12::Dispatch(bool deferExecution)
 
 ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* params)
 {
-    DLSSNRPipelineTrace::Mark("optifsr-fg-record", params->commandList, params->presentColor.resource, params->frameID);
     const int fIndex = params->frameID % BUFFER_COUNT;
 
     auto& state = State::Instance();

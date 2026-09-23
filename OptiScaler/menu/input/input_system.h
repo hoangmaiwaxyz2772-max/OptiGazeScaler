@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace OptiInput
@@ -197,6 +198,10 @@ bool Initialize(HWND targetHwnd, bool isUwp = false);
 bool Initialize(HWND targetHwnd, HWND inputHwnd, bool isUwp = false);
 
 void Shutdown();
+
+// Limit fallback keyboard polling while the menu is closed. Held keys and
+// modifiers are still updated; a null list restores full keyboard polling.
+void SetHiddenMenuPollingKeys(const int* keys, std::size_t count);
 
 void BeginFrame(HWND targetHwnd, bool isUwp = false);
 void BeginFrame(HWND targetHwnd, HWND inputHwnd, bool isUwp = false);

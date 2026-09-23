@@ -504,13 +504,10 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="upscalers\dlss\DLSSFeature_Dx11.h" />
     <ClInclude Include="upscalers\dlss\DLSSFeature_Dx12.h" />
     <ClInclude Include="upscalers\dlssnr\DLSSNRFeature_Dx12.h" />
-    <ClInclude Include="upscalers\dlssnr\DLSSNRDiagnostics.h" />
-    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineTrace.h" />
     <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineSplit.h" />
     <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineAccess.h" />
     <ClInclude Include="upscalers\dlssnr\DLSSNRNativeParameters.h" />
     <ClInclude Include="upscalers\dlssnr\DLSSNRSegmentMethods.inl" />
-    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineCapture.h" />
     <ClInclude Include="upscalers\dlssnr\DLSSNRPreview.h" />
     <ClInclude Include="upscalers\dlssnr\DLSSNRLatePass.h" />
     <ClInclude Include="upscalers\dlssnr\DLSSNRLateColor.h" />
@@ -765,7 +762,6 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     </ClCompile>
     <ClCompile Include="upscalers\dlssnr\DLSSNRPreview.cpp" />
     <ClCompile Include="upscalers\dlssnr\DLSSNRLatePass.cpp" />
-    <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineTrace.cpp" />
     <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineSplit.cpp" />
     <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineAccess.cpp" />
     <ClCompile Include="upscalers\dlss\DLSSFeature_Vk.cpp" />

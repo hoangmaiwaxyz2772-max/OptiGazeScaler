@@ -1,5 +1,4 @@
 #include <pch.h>
-#include <upscalers/dlssnr/DLSSNRPipelineTrace.h>
 
 #include "Streamline_Hooks.h"
 
@@ -581,35 +580,14 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     return o_slInit(localPref, sdkVersion);
 }
 
-static void TracePipelineTags(uint64_t call, sl::CommandBuffer* commands, const sl::ResourceTag* tags,
-                              uint32_t count, uint32_t frame, uint32_t viewport)
-{
-    if (!call || !tags) return;
-    for (uint32_t i = 0; i < count && i < 64; ++i)
-    {
-        const auto& tag = tags[i];
-        const auto native = tag.resource ? tag.resource->native : nullptr;
-        DLSSNRPipelineTrace::WatchResource(static_cast<ID3D12Resource*>(native));
-        DLSSNRPipelineTrace::Leave("sl-tag-frame-viewport", call, commands, native,
-                                   (uint64_t(frame) << 32) | viewport);
-        DLSSNRPipelineTrace::Leave("sl-tag-type-lifecycle", call, commands, native,
-                                   (uint64_t(tag.type) << 32) | uint32_t(tag.lifecycle));
-        DLSSNRPipelineTrace::Leave("sl-tag-state", call, commands, native,
-                                   tag.resource ? tag.resource->state : UINT_MAX);
-    }
-    if (count > 64) DLSSNRPipelineTrace::Leave("sl-tags-truncated", call, commands, nullptr, count - 64);
-}
+
 
 sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const sl::ResourceTag* tags,
                                        uint32_t numTags, sl::CommandBuffer* cmdBuffer)
 {
-    const auto trace = renderApi == sl::RenderAPI::eD3D12
-        ? DLSSNRPipelineTrace::Enter("sl-tags-enter", cmdBuffer, nullptr, numTags) : 0;
-    TracePipelineTags(trace, cmdBuffer, tags, numTags, UINT_MAX, static_cast<uint32_t>(viewport));
     auto forward = [&]()
     {
         const auto result = o_slSetTag(viewport, tags, numTags, cmdBuffer);
-        DLSSNRPipelineTrace::Leave("sl-tags-return", trace, cmdBuffer, nullptr, numTags, static_cast<HRESULT>(result));
         return result;
     };
     // Native FG needs observational tags even when OptiScaler owns no FG provider.
@@ -696,13 +674,9 @@ sl::Result StreamlineHooks::hkslSetTagForFrame(const sl::FrameToken& frame, cons
                                                const sl::ResourceTag* resources, uint32_t numResources,
                                                sl::CommandBuffer* cmdBuffer)
 {
-    const auto trace = renderApi == sl::RenderAPI::eD3D12
-        ? DLSSNRPipelineTrace::Enter("sl-frame-tags-enter", cmdBuffer, nullptr, numResources) : 0;
-    TracePipelineTags(trace, cmdBuffer, resources, numResources, static_cast<uint32_t>(frame), static_cast<uint32_t>(viewport));
     auto forward = [&]()
     {
         const auto result = o_slSetTagForFrame(frame, viewport, resources, numResources, cmdBuffer);
-        DLSSNRPipelineTrace::Leave("sl-frame-tags-return", trace, cmdBuffer, nullptr, numResources, static_cast<HRESULT>(result));
         return result;
     };
     if (State::Instance().activeFgInput != FGInput::NvngxFG &&
@@ -791,15 +765,7 @@ sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::F
 {
     const uint32_t frameIndex = static_cast<uint32_t>(frame);
     const uint32_t viewport = FindViewport(inputs, numInputs);
-    const auto fgTrace = feature == sl::kFeatureDLSS_G && renderApi == sl::RenderAPI::eD3D12
-        ? DLSSNRPipelineTrace::Enter("streamline-fg-enter", cmdBuffer, nullptr,
-                                     (uint64_t(frameIndex) << 32) | viewport) : 0;
-    if (fgTrace && inputs)
-        for (uint32_t i = 0; i < numInputs; ++i)
-            if (inputs[i] && inputs[i]->structType == sl::ResourceTag::s_structType)
-                TracePipelineTags(fgTrace, cmdBuffer, static_cast<const sl::ResourceTag*>(inputs[i]), 1, frameIndex, viewport);
     if (feature == sl::kFeatureDLSS_G && renderApi == sl::RenderAPI::eD3D12)
-        DLSSNRPipelineTrace::Mark("streamline-fg-evaluate", cmdBuffer, nullptr, frameIndex);
     LOG_DEBUG("frameIndex: {}", frameIndex);
 
     if (IsGazeContractCaptureEnabled())
@@ -871,8 +837,6 @@ sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::F
     if (!localizeRr)
     {
         const auto result = o_slEvaluateFeature(feature, frame, inputs, numInputs, cmdBuffer);
-        DLSSNRPipelineTrace::Leave("streamline-fg-return", fgTrace, cmdBuffer, nullptr,
-                                   (uint64_t(frameIndex) << 32) | viewport, static_cast<HRESULT>(result));
         return result;
     }
 

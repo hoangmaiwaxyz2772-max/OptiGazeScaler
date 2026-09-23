@@ -1,10 +1,8 @@
 #include <pch.h>
 #include "DLSSNRLatePass.h"
-#include "DLSSNRDiagnostics.h"
 #include "DLSSNRLateColor.h"
 #include "DLSSNRCommandState.h"
 #include "DLSSNRPreview.h"
-#include "DLSSNRPipelineTrace.h"
 #include "DLSSNRPipelineSplit.h"
 #include "DLSSNRPipelineAccess.h"
 #include <Config.h>
@@ -144,7 +142,6 @@ void DropPending(bool miss)
             LOG_WARN("[DLSSNR_LATE] no usable HUDfix scene this frame; skipped={}, completed={}, checksActive={}, skipChecks={}, upscaleFrame={}, presentFrame={}",
                 missed, completed, Hudfix_Dx12::IsResourceCheckActive(), Hudfix_Dx12::SkipHudlessChecks(),
                 Hudfix_Dx12::ActiveUpscaleFrame(), Hudfix_Dx12::ActivePresentFrame());
-            ResTrack_Dx12::LogLateCaptureDiagnostics();
         }
     }
     hasPending.store(false, std::memory_order_release);
@@ -195,8 +192,6 @@ bool Stage(DLSSNRFeatureDx12* owner, ID3D12Device* device, ID3D12GraphicsCommand
     DropPending(true);
     if (!Enabled() || !owner || !device || !commands || !parameters || !width || !height)
     {
-        DLSSNR_DIAG("stage-reject", "enabled={} owner={} device={} cmd={} parameters={} size={}x{}",
-            Enabled(), owner != nullptr, device != nullptr, commands != nullptr, parameters != nullptr, width, height);
         return false;
     }
     ResTrack_Dx12::HookDevice(device);
@@ -227,7 +222,6 @@ bool Stage(DLSSNRFeatureDx12* owner, ID3D12Device* device, ID3D12GraphicsCommand
     frame->inverted = inverted; frame->foveated = region != nullptr;
     frame->region = region ? *region : DLSSNRFeatureDx12::FoveatedRegion {};
     frame->serial = ++serial;
-    DLSSNRPipelineTrace::Mark("guide-snapshot-record", commands, frame->motion.Get(), frame->serial);
     auto& snapshot = frame->parameters;
     snapshot.Reset();
     for (const char* key : {NVSDK_NGX_Parameter_Width, NVSDK_NGX_Parameter_Height,
@@ -258,9 +252,6 @@ bool Stage(DLSSNRFeatureDx12* owner, ID3D12Device* device, ID3D12GraphicsCommand
     // takes a second lifetime reference covering its own command-list fence.
     GazeRoiFrameSync::DeferCallback([frame]() {});
     pending = frame; hasPending.store(true, std::memory_order_release);
-    DLSSNR_DIAG("staged", "frame={} producer=0x{:X} size={}x{} slot={} motion=0x{:X} depth=0x{:X} upscale={} present={}",
-        frame->serial, (uintptr_t)commands, width, height, slot, (uintptr_t)motion, (uintptr_t)depth,
-        Hudfix_Dx12::ActiveUpscaleFrame(), Hudfix_Dx12::ActivePresentFrame());
     return true;
 }
 
@@ -271,22 +262,14 @@ bool Process(ID3D12GraphicsCommandList* commands, ID3D12Resource* scene, D3D12_R
     auto frame = pending;
     if (!frame || !scene || !commands || commands->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT)
     {
-        DLSSNR_DIAG("process-reject", "reason=missing-context-or-nondirect frame={} scene={} cmd={} type={}",
-            frame != nullptr, scene != nullptr, commands != nullptr, commands ? (int)commands->GetType() : -1);
         return false;
     }
-    DLSSNR_DIAG("process-enter", "frame={} cmd=0x{:X} scene=0x{:X} state=0x{:X}",
-        frame->serial, (uintptr_t)commands, (uintptr_t)scene, (UINT)state);
-    const char* stateFailure = nullptr;
-    auto saved = DLSSNRCommandState::Snapshot(commands, &stateFailure);
+    auto saved = DLSSNRCommandState::Snapshot(commands);
     if (!saved)
     {
-        DLSSNR_DIAG("process-reject", "frame={} cmd=0x{:X} reason={}", frame->serial, (uintptr_t)commands, stateFailure);
         Bypass("candidate command state is incomplete, bundled, or inside a render pass"); return false;
     }
     auto desc = scene->GetDesc();
-    DLSSNRPipelineTrace::Mark("hudless-nr-boundary", commands, scene, frame->serial);
-    DLSSNRPipelineTrace::WatchResource(scene);
     const auto space = colorSpace.load(std::memory_order_acquire);
     UINT encoding = 0;
     if (space == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709) encoding = 1;
@@ -343,9 +326,6 @@ bool Process(ID3D12GraphicsCommandList* commands, ID3D12Resource* scene, D3D12_R
     DLSSNRPipelineAccess::PrivateWork privateWork;
     frame->color.Read(frame->device.Get(), commands, scene, state, encoding,
                       config->DLSSNRPresentPreview.value_or_default() == 3);
-    DLSSNR_DIAG("scene-copy-recorded", "frame={} scene=0x{:X} format={} size={}x{} work={}x{}+{},{} encoding={} slot={} typedWrite={}",
-        frame->serial, (uintptr_t)scene, (UINT)desc.Format, desc.Width, desc.Height,
-        frame->color.regionWidth, frame->color.regionHeight, frame->color.regionX, frame->color.regionY, encoding, slot, frame->color.typedOutput);
     DLSSNRPreview::Capture(frame->device.Get(), commands, frame->color.color.Get(),
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, 0, 0, width, height, 3, encoding != 0);
     // Consume once. A failed model evaluation must not run again on another
@@ -355,12 +335,10 @@ bool Process(ID3D12GraphicsCommandList* commands, ID3D12Resource* scene, D3D12_R
     const bool success = frame->owner->Evaluate(frame->device.Get(), commands, &snapshot, width, height,
         frame->inverted, frame->foveated ? &region : nullptr,
         encoding == 0 ? DLSSNRFeatureDx12::ColorDomain::DisplaySDR : DLSSNRFeatureDx12::ColorDomain::DisplayLinearHDR, slot, &processed);
-    DLSSNR_DIAG("model-result", "frame={} success={}", frame->serial, success);
     if (!success)
     { Bypass("model evaluation failed; original scene retained"); frame->owner->InvalidateHistory(); return false; }
     if (processed) frame->color.SetProcessed(frame->device.Get(), processed);
     frame->color.Write(commands, scene, state, encoding, processed);
-    DLSSNRPipelineTrace::AfterNR(commands);
     ++completed;
     if (completed == 1 || completed % 300 == 0 || !lastReason.empty())
         LOG_INFO("[DLSSNR_LATE] wrote original scene={:X} allocation={}x{} logical={}x{} format={} encoding={} frame={} completed={}",

@@ -11,7 +11,6 @@
 #include <menu/menu_overlay_dx.h>
 #include <upscalers/dlssnr/DLSSNRPreview.h>
 #include <upscalers/dlssnr/DLSSNRLatePass.h>
-#include <upscalers/dlssnr/DLSSNRPipelineTrace.h>
 #include <upscalers/dlssnr/DLSSNRPipelineAccess.h>
 
 #include <misc/FrameLimit.h>
@@ -168,11 +167,6 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     HRESULT presentResult;
 
     auto willPresent = (Flags & DXGI_PRESENT_TEST) == 0;
-    if (willPresent)
-    {
-        DLSSNRPipelineTrace::Poll();
-        DLSSNRPipelineTrace::Mark("present-enter", pSwapChain);
-    }
     if (willPresent) DLSSNRLatePass::EndFrame();
 
     if (willPresent)
@@ -218,7 +212,6 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
     else if (pDevice->QueryInterface(IID_PPV_ARGS(&cq)) == S_OK)
     {
-        if (willPresent) DLSSNRPipelineTrace::ObserveQueue(cq);
         cq->Release();
 
         if (!_dx12Device)
@@ -227,12 +220,6 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         ID3D12CommandQueue* realQueue = nullptr;
         if (Util::CheckForRealObject(__FUNCTION__, cq, (IUnknown**) &realQueue))
             cq = realQueue;
-
-        if (willPresent)
-        {
-            DLSSNRPipelineTrace::ObserveQueue(cq);
-            DLSSNRPipelineTrace::Mark("present-queue", pSwapChain, cq);
-        }
 
         State::Instance().swapchainApi = DX12;
 
@@ -312,13 +299,11 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     // DXVK check, it's here because of upscaler time calculations
     if (IdentifyGpu::getPrimaryGpu().usesDxvk)
     {
-        const auto trace = willPresent ? DLSSNRPipelineTrace::Enter("native-present-enter", pSwapChain, cq, Flags) : 0;
         if (pPresentParameters == nullptr)
             presentResult = pSwapChain->Present(SyncInterval, Flags);
         else
             presentResult = ((IDXGISwapChain1*) pSwapChain)->Present1(SyncInterval, Flags, pPresentParameters);
 
-        DLSSNRPipelineTrace::Leave("native-present-return", trace, pSwapChain, cq, Flags, presentResult);
 
         if (presentResult == S_OK)
         {
@@ -342,7 +327,6 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             LOG_ERROR("3 {:X}", (UINT) presentResult);
         }
 
-        if (willPresent) DLSSNRPipelineTrace::EndPresent(presentResult);
         return presentResult;
     }
 
@@ -354,7 +338,6 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
         // Final model preview bypasses all game post-processing. Draw before
         // the Present overlay so its controls remain accessible.
-        const auto previewTrace = DLSSNRPipelineTrace::Enter("preview-enter", pSwapChain, cq);
         if (cq != nullptr && DLSSNRPreview::Present(pSwapChain, cq))
         {
             // We replaced the complete buffer, so Present1 dirty/scroll rects
@@ -362,12 +345,9 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             static const DXGI_PRESENT_PARAMETERS fullPreview {};
             if (pPresentParameters != nullptr) pPresentParameters = &fullPreview;
         }
-        DLSSNRPipelineTrace::Leave("preview-return", previewTrace, pSwapChain, cq);
 
         // Draw overlay
-        const auto overlayTrace = DLSSNRPipelineTrace::Enter("overlay-enter", pSwapChain, cq);
         MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);
-        DLSSNRPipelineTrace::Leave("overlay-return", overlayTrace, pSwapChain, cq);
 
 #ifdef LOW_LATENCY_INPUTS
         if (State::Instance().activeFgOutput == FGOutput::FSRFG)
@@ -402,13 +382,11 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     LOG_DEBUG("Calling original present");
 
     // swapchain present
-    const auto nativeTrace = willPresent ? DLSSNRPipelineTrace::Enter("native-present-enter", pSwapChain, cq, Flags) : 0;
     if (pPresentParameters == nullptr)
         presentResult = pSwapChain->Present(SyncInterval, Flags);
     else
         presentResult = ((IDXGISwapChain1*) pSwapChain)->Present1(SyncInterval, Flags, pPresentParameters);
 
-    DLSSNRPipelineTrace::Leave("native-present-return", nativeTrace, pSwapChain, cq, Flags, presentResult);
 
     if (presentResult == S_OK)
     {
@@ -422,7 +400,6 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             Util::GetDeviceRemovedReason(State::Instance().currentD3D12Device);
     }
 
-    if (willPresent) DLSSNRPipelineTrace::EndPresent(presentResult);
     return presentResult;
 }
 

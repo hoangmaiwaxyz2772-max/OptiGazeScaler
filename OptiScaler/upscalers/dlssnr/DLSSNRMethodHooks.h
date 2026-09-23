@@ -58,9 +58,10 @@ struct Threads
     }
 };
 
-template<unsigned Method, typename Function> struct MethodHook;
-template<unsigned Method, typename Return, typename Object, typename... Args>
-struct MethodHook<Method, Return(STDMETHODCALLTYPE*)(Object*, Args...)>
+template<unsigned Method, typename Function, bool TrackingOnly = false, bool (*ShouldObserve)() = nullptr>
+struct MethodHook;
+template<unsigned Method, bool TrackingOnly, bool (*ShouldObserve)(), typename Return, typename Object, typename... Args>
+struct MethodHook<Method, Return(STDMETHODCALLTYPE*)(Object*, Args...), TrackingOnly, ShouldObserve>
 {
     using Function = Return(STDMETHODCALLTYPE*)(Object*, Args...);
     static constexpr size_t Capacity = 8;
@@ -81,6 +82,11 @@ struct MethodHook<Method, Return(STDMETHODCALLTYPE*)(Object*, Args...)>
     template<size_t Index> static Return STDMETHODCALLTYPE Invoke(Object* object, Args... args)
     {
         auto& entry = entries[Index];
+        // Inactive observers need neither a callback nor the per-method TLS
+        // scope. Keep forwarding through the original chain (including other
+        // consumers' hooks), so observation can resume without reinstalling.
+        if constexpr (ShouldObserve != nullptr)
+            if (!ShouldObserve()) return entry.original(object, args...);
         // A driver implementation can forward to the runtime entry. Process
         // that operation once, while still allowing calls on another list.
         if (current && currentObject == object)

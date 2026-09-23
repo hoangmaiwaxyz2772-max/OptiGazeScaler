@@ -57,7 +57,13 @@ DirectInputDeviceRelease_t o_DirectInputDeviceRelease = nullptr;
 
 thread_local int bypassHookDepth = 0;
 
-bool ShouldApplyBlockingPolicyLocked() { return bypassHookDepth == 0 && _state.MenuVisible; }
+std::mutex& GetDetourTransactionMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+bool ShouldApplyBlockingPolicyLocked() { return bypassHookDepth == 0 && _state.MenuVisible && _state.Focused; }
 
 bool ShouldBlockKeyboardInputLocked() { return ShouldApplyBlockingPolicyLocked() && _state.BlockKeyboard; }
 
@@ -65,8 +71,59 @@ bool ShouldBlockMouseInputLocked() { return ShouldApplyBlockingPolicyLocked() &&
 
 bool ShouldBlockCursorInputLocked() { return ShouldApplyBlockingPolicyLocked() && _state.BlockCursor; }
 
+void HandleBlockingFocusGainLocked()
+{
+    if (!_state.MenuVisible || !_state.Focused)
+        return;
+
+    POINT blockedCursorPos {};
+    if (o_GetCursorPos != nullptr && o_GetCursorPos(&blockedCursorPos))
+        _state.BlockedCursorScreenPos = blockedCursorPos;
+    else
+        _state.BlockedCursorScreenPos = _state.MouseScreenPos;
+
+    _state.HasBlockedCursorScreenPos = true;
+
+    LOG_DEBUG("captured blocked cursor position screen:({}, {})", _state.BlockedCursorScreenPos.x,
+              _state.BlockedCursorScreenPos.y);
+
+    BeginCursorClipBlockLocked();
+}
+
+void HandleBlockingFocusLossLocked()
+{
+    if (!_state.MenuVisible)
+        return;
+
+    // Focus loss temporarily releases game-input blocking while the menu may remain open.
+    EndCursorClipBlockLocked();
+    DrainDirectInputBufferedDataLocked();
+    DrainXInputKeystrokesLocked();
+    ResetButtonBlockedStateLocked();
+    ResetRawInputBlockStateLocked();
+    ResetRawInputSanitizeCacheLocked();
+}
+
 namespace
 {
+std::mutex optionalInputIntegrationMutex;
+
+void UpdateOptionalInputIntegrations()
+{
+    std::scoped_lock integrationLock(optionalInputIntegrationMutex);
+
+    {
+        std::unique_lock stateLock(_state.Mutex);
+
+        if (!_state.Initialized || !_state.HooksInstalled)
+            return;
+    }
+
+    UpdateGameInputIntegration();
+    UpdateXInputIntegration();
+    UpdateDirectInputIntegration();
+}
+
 const char* YesNo(bool value) { return value ? "yes" : "no"; }
 
 const char* AcquisitionModeName(InputAcquisitionMode mode)
@@ -105,7 +162,7 @@ InputAcquisitionMode ResolveInputAcquisitionModeLocked()
     if (_state.ReceivedWindowMessageThisFrame || _state.ReceivedQueueMessageThisFrame)
         return InputAcquisitionMode::WindowMessages;
 
-    if (_state.PolledInputUsedThisFrame || _state.PolledInputActive)
+    if (_state.PolledInputUsedThisFrame)
         return InputAcquisitionMode::PolledAbsolute;
 
     return InputAcquisitionMode::None;
@@ -148,7 +205,7 @@ void LogInputHealthSnapshotLocked(const char* origin)
     static bool lastExternalRawInputSinkRegistered = false;
     static DWORD lastTargetProcessId = 0;
     static DWORD lastInputProcessId = 0;
-    static std::uint64_t lastNoInputWarnFrame = 0;
+    static std::uint64_t lastPollingFallbackWarnFrame = 0;
     static std::uint64_t lastNoInputHwndWarnFrame = 0;
     static std::uint64_t lastNoSubclassWarnFrame = 0;
 
@@ -255,13 +312,14 @@ void LogInputHealthSnapshotLocked(const char* origin)
             _state.DirectInputGetDeviceDataBlockedCount);
 #else
         LOG_DEBUG("{} health frame:{} mode:{} target:{} input:{} focused:{} menu:{} subclassed:{} hooks:{} "
-                  "recvWnd:{} recvQueue:{} recvRaw:{} polled:{} rawMouse:{} rawKeyboard:{} trackedHooks:{} "
-                  "xinput:{} dinput:{} hidMouse:{} hidKeyboard:{} hidGamepad:{}",
+                  "recvWnd:{} recvQueue:{} recvRaw:{} recvAny:{} polledActive:{} polledUsed:{} rawMouse:{} "
+                  "rawKeyboard:{} trackedHooks:{} xinput:{} dinput:{} hidMouse:{} hidKeyboard:{} hidGamepad:{}",
                   origin != nullptr ? origin : "?", frameIndex, AcquisitionModeName(_state.AcquisitionMode),
                   static_cast<void*>(_state.TargetHwnd), static_cast<void*>(_state.InputHwnd), YesNo(_state.Focused),
                   YesNo(_state.MenuVisible), YesNo(_state.WndProcSubclassed), YesNo(_state.HooksInstalled),
                   YesNo(_state.ReceivedWindowMessageThisFrame), YesNo(_state.ReceivedQueueMessageThisFrame),
-                  YesNo(_state.ReceivedRawInputThisFrame), YesNo(_state.PolledInputActive),
+                  YesNo(_state.ReceivedRawInputThisFrame), YesNo(_state.ReceivedAnyInputThisFrame),
+                  YesNo(_state.PolledInputActive), YesNo(_state.PolledInputUsedThisFrame),
                   YesNo(_state.RawMouseRegistered), YesNo(_state.RawKeyboardRegistered),
                   CountTrackedWindowsHooksLocked(), YesNo(_state.XInputModuleLoaded),
                   YesNo(_state.DirectInputModuleLoaded), YesNo(_state.HidMouseHandleSeen),
@@ -288,15 +346,21 @@ void LogInputHealthSnapshotLocked(const char* origin)
             YesNo(_state.ExternalTargetProcess));
     }
 
-    if (_state.MenuVisible && _state.InputHwnd != nullptr && !_state.ReceivedAnyInputThisFrame &&
-        frameIndex - lastNoInputWarnFrame >= 600)
+    const bool receivedNativeInputThisFrame = _state.ReceivedWindowMessageThisFrame ||
+                                              _state.ReceivedQueueMessageThisFrame || _state.ReceivedRawInputThisFrame;
+
+    // An idle frame without Win32/raw messages is normal.
+    // Only warn when polling actually observed user input while all native message paths saw none
+    if (_state.MenuVisible && _state.Focused && _state.InputHwnd != nullptr && _state.PolledInputUsedThisFrame &&
+        !receivedNativeInputThisFrame && frameIndex - lastPollingFallbackWarnFrame >= 600)
     {
-        lastNoInputWarnFrame = frameIndex;
-        LOG_WARN("menu is visible but no window/queue/raw input was received this frame. input:{} foreground:{} "
-                 "focused:{} subclassed:{}. Check that InputHwnd is the real overlay/menu HWND and that its message "
-                 "pump runs.",
+        lastPollingFallbackWarnFrame = frameIndex;
+        LOG_WARN("menu input was acquired by polling but no window/queue/raw input was observed this frame. "
+                 "input:{} foreground:{} focused:{} subclassed:{} polledMouse:{} polledKeyboard:{}. The polling "
+                 "fallback is working; verify InputHwnd/message routing only if native message input is expected.",
                  static_cast<void*>(_state.InputHwnd), static_cast<void*>(foregroundHwnd), YesNo(_state.Focused),
-                 YesNo(_state.WndProcSubclassed));
+                 YesNo(_state.WndProcSubclassed), YesNo(_state.PolledMouseUsedThisFrame),
+                 YesNo(_state.PolledKeyboardUsedThisFrame));
     }
 
     lastTargetHwnd = _state.TargetHwnd;
@@ -670,6 +734,15 @@ void PollInputFallbackLocked()
 
     for (int vk = 0; vk < 256; ++vk)
     {
+        // A closed menu only consumes its shortcuts. GetAsyncKeyState enters
+        // Win32 for each key, so polling the whole keyboard here can cost
+        // milliseconds on every render frame while holding the input mutex.
+        // Keep polling held keys until release to avoid stale state when the
+        // menu closes or a shortcut is rebound.
+        if (!_state.MenuVisible && _state.HiddenMenuPollingConfigured && !_state.HiddenMenuPollingKeys[vk] &&
+            !_state.Keys[vk].Down)
+            continue;
+
         const bool wasDown = _state.Keys[vk].Down;
         PollVirtualKeyLocked(vk, time);
 
@@ -711,22 +784,17 @@ void ApplyMenuVisibilityChangeLocked(bool visible)
 
     if (!wasMenuVisible && visible)
     {
-        POINT blockedCursorPos {};
-        if (o_GetCursorPos != nullptr && o_GetCursorPos(&blockedCursorPos))
-            _state.BlockedCursorScreenPos = blockedCursorPos;
-        else
-            _state.BlockedCursorScreenPos = _state.MouseScreenPos;
-
-        _state.HasBlockedCursorScreenPos = true;
-
-        LOG_DEBUG("captured blocked cursor position screen:({}, {})", _state.BlockedCursorScreenPos.x,
-                  _state.BlockedCursorScreenPos.y);
-
-        BeginCursorClipBlockLocked();
+        HandleBlockingFocusGainLocked();
     }
     else if (wasMenuVisible && !visible)
     {
         EndCursorClipBlockLocked();
+
+        // Event-style controller APIs keep their own queues. Drain them before
+        // releasing the menu block so menu-time events cannot replay into the
+        // game on the first frame after closing.
+        DrainDirectInputBufferedDataLocked();
+        DrainXInputKeystrokesLocked();
 
         _state.HasBlockedCursorScreenPos = false;
         _state.BlockedCursorScreenPos = {};
@@ -764,12 +832,27 @@ bool Initialize(const InitializeOptions& options)
         if (options.InputHwnd != nullptr && options.InputHwnd != _state.InputHwnd)
             SetInputWindow(options.InputHwnd, options.UseWndProcSubclass, true);
 
-        LOG_DEBUG(
-            "Initialize re-entry state target:{} targetPid:{} input:{} inputPid:{} externalTarget:{} subclassed:{}",
-            static_cast<void*>(_state.TargetHwnd), _state.TargetProcessId, static_cast<void*>(_state.InputHwnd),
-            _state.InputProcessId, _state.ExternalTargetProcess ? 1 : 0, _state.WndProcSubclassed ? 1 : 0);
+        if (!_state.HooksInstalled)
+        {
+            LOG_WARN("Initialize re-entry retrying incomplete Win32 hook installation");
+            _state.HooksInstalled = InstallHooks();
+        }
 
-        return true;
+        const bool hooksInstalled = _state.HooksInstalled;
+
+        LOG_DEBUG(
+            "Initialize re-entry state target:{} targetPid:{} input:{} inputPid:{} externalTarget:{} subclassed:{} "
+            "hooksInstalled:{}",
+            static_cast<void*>(_state.TargetHwnd), _state.TargetProcessId, static_cast<void*>(_state.InputHwnd),
+            _state.InputProcessId, _state.ExternalTargetProcess ? 1 : 0, _state.WndProcSubclassed ? 1 : 0,
+            hooksInstalled ? 1 : 0);
+
+        lock.unlock();
+
+        if (hooksInstalled)
+            UpdateOptionalInputIntegrations();
+
+        return hooksInstalled;
     }
 
     _state.Initialized = true;
@@ -790,12 +873,10 @@ bool Initialize(const InitializeOptions& options)
              static_cast<void*>(_state.InputHwnd), _state.InputProcessId, _state.ExternalTargetProcess ? 1 : 0,
              _state.WndProcSubclassed ? 1 : 0);
 
+    lock.unlock();
+
     if (hooksInstalled)
-    {
-        UpdateGameInputIntegrationLocked();
-        UpdateXInputIntegrationLocked();
-        UpdateDirectInputIntegrationLocked();
-    }
+        UpdateOptionalInputIntegrations();
 
     return hooksInstalled;
 }
@@ -848,6 +929,8 @@ void ResetStateAfterShutdown()
     _state.PolledInputUsedThisFrame = false;
     _state.PolledMouseUsedThisFrame = false;
     _state.PolledKeyboardUsedThisFrame = false;
+    _state.HiddenMenuPollingKeys.fill(false);
+    _state.HiddenMenuPollingConfigured = false;
     _state.AcquisitionMode = InputAcquisitionMode::None;
     _state.ExternalVirtualMouseActive = false;
     _state.ExternalVirtualMouseUsedThisFrame = false;
@@ -1049,18 +1132,56 @@ void ResetStateAfterShutdown()
 
 void Shutdown()
 {
+    // Keep optional integration install/remove operations mutually exclusive.
+    std::unique_lock integrationLock(optionalInputIntegrationMutex);
     std::unique_lock lock(_state.Mutex);
 
-    RemoveWindowSubclass();
-    ReleaseTrackedWindowsHooksLocked();
+    // Restore cursor confinement and clear the blocking policy before any hook teardown
+    if (_state.MenuVisible)
+        ApplyMenuVisibilityChangeLocked(false);
+    else if (_state.CursorClipReleasedForMenu)
+        EndCursorClipBlockLocked();
+
+    const bool windowSubclassRemoved = RemoveWindowSubclass(true);
+    const bool trackedWindowsHooksRemoved = ReleaseTrackedWindowsHooksLocked();
     RemoveExternalRawInputSinkLocked();
-    RemoveExternalMouseHookLocked();
-    RemoveDirectInputHooksLocked();
-    RemoveXInputHooksLocked();
-    RemoveGameInputHooksLocked();
-    RemoveHooks();
+    const bool externalMouseHookRemoved = RemoveExternalMouseHookLocked();
+
+    const bool directInputRemoved = RemoveDirectInputHooksLocked();
+    const bool xInputRemoved = RemoveXInputHooksLocked();
+    const bool gameInputRemoved = RemoveGameInputHooksLocked();
+    const bool win32HooksRemoved = RemoveHooks();
+
+    if (!windowSubclassRemoved || !trackedWindowsHooksRemoved || !externalMouseHookRemoved || !directInputRemoved ||
+        !xInputRemoved || !gameInputRemoved || !win32HooksRemoved)
+    {
+        LOG_ERROR("OptiInput shutdown incomplete; retaining state/trampolines for safety wndProc:{} trackedHooks:{} "
+                  "externalMouse:{} dinput:{} xinput:{} gameInput:{} win32:{}",
+                  windowSubclassRemoved ? 1 : 0, trackedWindowsHooksRemoved ? 1 : 0, externalMouseHookRemoved ? 1 : 0,
+                  directInputRemoved ? 1 : 0, xInputRemoved ? 1 : 0, gameInputRemoved ? 1 : 0,
+                  win32HooksRemoved ? 1 : 0);
+        return;
+    }
 
     ResetStateAfterShutdown();
+}
+
+void SetHiddenMenuPollingKeys(const int* keys, std::size_t count)
+{
+    std::unique_lock lock(_state.Mutex);
+    _state.HiddenMenuPollingConfigured = keys != nullptr;
+    _state.HiddenMenuPollingKeys.fill(false);
+    if (keys == nullptr)
+        return;
+
+    for (std::size_t i = 0; i < count; ++i)
+        if (keys[i] > 0 && keys[i] < static_cast<int>(_state.HiddenMenuPollingKeys.size()))
+            _state.HiddenMenuPollingKeys[keys[i]] = true;
+
+    // Generic Shift/Ctrl/Alt states are synthesized from their left/right
+    // keys. Preserve those states and modifier shortcuts in the reduced set.
+    for (const int vk : { VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU })
+        _state.HiddenMenuPollingKeys[vk] = true;
 }
 
 static void BeginFrameLocked(HWND targetHwnd, HWND inputHwnd, bool hasInputHwnd, bool isUwp)
@@ -1081,11 +1202,6 @@ static void BeginFrameLocked(HWND targetHwnd, HWND inputHwnd, bool hasInputHwnd,
     ValidateInputWindowLocked();
     ValidateWindowSubclassLocked();
 
-    // Optional input APIs may be loaded after OptiInput initialization.
-    UpdateGameInputIntegrationLocked();
-    UpdateXInputIntegrationLocked();
-    UpdateDirectInputIntegrationLocked();
-
     UpdateFocusState(_state.TargetHwnd);
     EnsureExternalRawInputSinkLocked();
     UpdateExternalMouseHookLocked();
@@ -1098,9 +1214,19 @@ void BeginFrame(HWND targetHwnd, bool isUwp)
     std::unique_lock lock(_state.Mutex);
 
     if (!_state.Initialized)
+    {
+        lock.unlock();
         Initialize(targetHwnd, isUwp);
+        lock.lock();
+    }
 
-    BeginFrameLocked(targetHwnd, nullptr, false, isUwp);
+    if (_state.Initialized)
+        BeginFrameLocked(targetHwnd, nullptr, false, isUwp);
+
+    lock.unlock();
+
+    // Module/export resolution can wait on the loader
+    UpdateOptionalInputIntegrations();
 }
 
 void BeginFrame(HWND targetHwnd, HWND inputHwnd, bool isUwp)
@@ -1108,9 +1234,19 @@ void BeginFrame(HWND targetHwnd, HWND inputHwnd, bool isUwp)
     std::unique_lock lock(_state.Mutex);
 
     if (!_state.Initialized)
+    {
+        lock.unlock();
         Initialize(targetHwnd, inputHwnd, isUwp);
+        lock.lock();
+    }
 
-    BeginFrameLocked(targetHwnd, inputHwnd, inputHwnd != nullptr, isUwp);
+    if (_state.Initialized)
+        BeginFrameLocked(targetHwnd, inputHwnd, inputHwnd != nullptr, isUwp);
+
+    lock.unlock();
+
+    // Module/export resolution can wait on the loader
+    UpdateOptionalInputIntegrations();
 }
 
 void FeedImGui(bool menuVisible)
@@ -1356,32 +1492,29 @@ POINT GetMouseScreenPos()
 bool ShouldBlockMouse()
 {
     std::unique_lock lock(_state.Mutex);
-    return _state.BlockMouse;
+    return ShouldBlockMouseInputLocked();
 }
 
 bool ShouldBlockKeyboard()
 {
     std::unique_lock lock(_state.Mutex);
-    return _state.BlockKeyboard;
+    return ShouldBlockKeyboardInputLocked();
 }
 
 bool ShouldBlockCursor()
 {
     std::unique_lock lock(_state.Mutex);
-    return _state.BlockCursor;
+    return ShouldBlockCursorInputLocked();
 }
 
 bool ShouldBlockVirtualKey(int vk)
 {
     std::unique_lock lock(_state.Mutex);
 
-    if (!ShouldApplyBlockingPolicyLocked())
-        return false;
-
     if (IsMouseVirtualKey(vk))
-        return _state.BlockMouse;
+        return ShouldBlockMouseInputLocked();
 
-    return _state.BlockKeyboard;
+    return ShouldBlockKeyboardInputLocked();
 }
 
 DebugState GetDebugState()

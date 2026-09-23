@@ -21,6 +21,7 @@
 #include <upscaler_time/UpscalerTime_Dx11.h>
 #include <upscaler_time/UpscalerTime_Dx12.h>
 #include <upscalers/dlssnr/DLSSNRFeature_Dx12.h>
+#include <upscalers/dlssnr/DLSSNRPipelineSplit.h>
 
 #include <imgui/imgui_internal.h>
 #include <imgui/ImGuiNotify.hpp>
@@ -243,9 +244,11 @@ inline std::string StrFmt(const char* fmt, ...)
 
 void MenuCommon::UpdateManualInput(HWND targetHwnd)
 {
-    OptiInput::BeginFrame(targetHwnd);
-
     const auto config = Config::Instance();
+    const int shortcutKeys[] { config->ShortcutKey.value_or_default(), config->FpsShortcutKey.value_or_default(),
+                              config->FGShortcutKey.value_or_default(), config->FpsCycleShortcutKey.value_or_default() };
+    OptiInput::SetHiddenMenuPollingKeys(shortcutKeys, std::size(shortcutKeys));
+    OptiInput::BeginFrame(targetHwnd);
 
     auto CheckShortcut = [&](int vk, bool& inputFlag, const char* logMessage)
     {
@@ -6109,9 +6112,11 @@ void MenuCommon::RenderDlssNrSettings(RenderMenuContext& ctx)
         }
 
         const bool lowResolutionFullOutput = config->DLSSNRLowResolutionFullOutput.value_or_default();
+        ImGui::EndDisabled();
         ImGui::Spacing();
         if (ImGui::TreeNode("Advanced diagnostics"))
         {
+            ImGui::BeginDisabled(!enabled);
             const auto guideDimensions = DLSSNRFeatureDx12::GetLastOriginalGuideDimensions();
             if (guideDimensions.observed)
             {
@@ -6228,9 +6233,9 @@ void MenuCommon::RenderDlssNrSettings(RenderMenuContext& ctx)
             ShowHelpMarker("Replaces the depth resource supplied to DLSS NR with a typed texture containing only "
                            "zero depth values.");
 
+            ImGui::EndDisabled();
             ImGui::TreePop();
         }
-        ImGui::EndDisabled();
     }
 }
 

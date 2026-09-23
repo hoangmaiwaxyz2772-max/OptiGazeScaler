@@ -98,10 +98,6 @@
     <ClInclude Include="upscalers\dlssnr\DLSSNRFeature_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="upscalers\dlssnr\DLSSNRDiagnostics.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineTrace.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineSplit.h">
@@ -116,7 +112,6 @@
     <ClInclude Include="upscalers\dlssnr\DLSSNRSegmentMethods.inl">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="upscalers\dlssnr\DLSSNRPipelineCapture.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="upscalers\dlssnr\DLSSNRPreview.h">
@@ -1058,7 +1053,6 @@
     <ClCompile Include="upscalers\dlssnr\DLSSNRLatePass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineTrace.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="upscalers\dlssnr\DLSSNRPipelineSplit.cpp">

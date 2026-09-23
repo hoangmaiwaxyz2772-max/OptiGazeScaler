@@ -73,6 +73,11 @@ void SetFocusStateLocked(bool focused, const char* reason, HWND foreground, DWOR
     const bool oldFocused = _state.Focused;
     _state.Focused = focused;
 
+    if (oldFocused && !focused)
+        HandleBlockingFocusLossLocked();
+    else if (!oldFocused && focused)
+        HandleBlockingFocusGainLocked();
+
     if (oldFocused != focused)
     {
         LOG_DEBUG(
@@ -241,12 +246,17 @@ void ClearTargetWindowLocked()
                  _state.TargetProcessId, _state.TargetThreadId);
     }
 
+    const bool wasFocused = _state.Focused;
+
     _state.TargetHwnd = nullptr;
     _state.TargetRootHwnd = nullptr;
     _state.TargetProcessId = 0;
     _state.TargetThreadId = 0;
     _state.ExternalTargetProcess = false;
     _state.Focused = false;
+
+    if (wasFocused)
+        HandleBlockingFocusLossLocked();
 
     if (!_state.HasExplicitInputHwnd)
     {
@@ -460,10 +470,21 @@ void ValidateWindowSubclassLocked()
     }
 }
 
-void RemoveWindowSubclass()
+bool RemoveWindowSubclass(bool preserveLostChain)
 {
     if (!_state.WndProcSubclassed || _state.InputHwnd == nullptr || _state.OriginalWndProc == nullptr)
     {
+        const bool lostChainMayStillReferenceUs =
+            !_state.WndProcSubclassed && _state.InputHwnd != nullptr && _state.OriginalWndProc != nullptr;
+
+        if (lostChainMayStillReferenceUs && preserveLostChain)
+        {
+            LOG_WARN("RemoveWindowSubclass preserving original WndProc because another WndProc may still chain "
+                     "through OptiInput input:{} original:{}",
+                     static_cast<void*>(_state.InputHwnd), reinterpret_cast<std::uintptr_t>(_state.OriginalWndProc));
+            return false;
+        }
+
         if (_state.WndProcSubclassed || _state.OriginalWndProc != nullptr)
         {
             LOG_DEBUG("RemoveWindowSubclass clearing stale state input:{} original:{} subclassed:{}",
@@ -472,7 +493,7 @@ void RemoveWindowSubclass()
         }
         _state.WndProcSubclassed = false;
         _state.OriginalWndProc = nullptr;
-        return;
+        return true;
     }
 
     WNDPROC currentWndProc = nullptr;
@@ -481,17 +502,31 @@ void RemoveWindowSubclass()
     {
         LOG_INFO("removing subclass input:{} restoringWndProc:{}", static_cast<void*>(_state.InputHwnd),
                  reinterpret_cast<std::uintptr_t>(_state.OriginalWndProc));
-        SetWindowLongPtrW(_state.InputHwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(_state.OriginalWndProc));
+
+        SetLastError(0);
+        const LONG_PTR previous =
+            SetWindowLongPtrW(_state.InputHwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(_state.OriginalWndProc));
+
+        if (previous == 0 && GetLastError() != 0)
+        {
+            LOG_WARN("RemoveWindowSubclass restore failed input:{} lastError:{}", static_cast<void*>(_state.InputHwnd),
+                     GetLastError());
+            return false;
+        }
     }
     else
     {
         LOG_WARN("RemoveWindowSubclass did not restore because current WndProc changed input:{} current:{} opti:{}",
                  static_cast<void*>(_state.InputHwnd), reinterpret_cast<std::uintptr_t>(currentWndProc),
                  reinterpret_cast<std::uintptr_t>(OptiInputWndProc));
+
+        if (preserveLostChain)
+            return false;
     }
 
     _state.WndProcSubclassed = false;
     _state.OriginalWndProc = nullptr;
+    return true;
 }
 
 bool IsInputWindow(HWND hwnd)

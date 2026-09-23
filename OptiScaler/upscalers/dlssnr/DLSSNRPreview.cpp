@@ -1,5 +1,4 @@
 #include <pch.h>
-#include "DLSSNRDiagnostics.h"
 #include "DLSSNRPreview.h"
 #include <Config.h>
 #include <shaders/Shader_Common.h>
@@ -216,7 +215,6 @@ void Capture(ID3D12Device* device, ID3D12GraphicsCommandList* commands, ID3D12Re
         }
         if (!image)
         {
-            DLSSNR_DIAG("preview-reject", "reason=copy-pool-busy mode={}", mode);
             return;
         }
         ComPtr<ID3D12Device> owner;
@@ -241,7 +239,6 @@ void Capture(ID3D12Device* device, ID3D12GraphicsCommandList* commands, ID3D12Re
     commands->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
     Barrier(commands, image->texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
     Barrier(commands, source, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
-    DLSSNR_DIAG("preview-copy-recorded", "serial={} mode={} cmd=0x{:X} size={}x{}", image->serial, mode, (uintptr_t)commands, width, height);
     GazeRoiFrameSync::DeferCallback([image]()
     {
         auto& data = Data();
@@ -249,8 +246,6 @@ void Capture(ID3D12Device* device, ID3D12GraphicsCommandList* commands, ID3D12Re
         if (!data.latest || image->serial > data.latest->serial)
         {
             data.latest = image;
-            DLSSNR_DIAG("preview-published", "serial={} mode={} ageMs={}", image->serial, image->mode,
-                std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - image->captured).count());
         }
     });
 }
@@ -262,12 +257,8 @@ void SetColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace)
 
 bool Present(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
 {
-    const UINT requestedMode = Config::Instance()->DLSSNRPresentPreview.value_or_default();
     if (!swapchain || !queue || !everCaptured.load(std::memory_order_relaxed))
     {
-        if (requestedMode != 0)
-            DLSSNR_DIAG("preview-wait", "reason=no-capture-or-present-context mode={} swapchain={} queue={} everCaptured={}",
-                requestedMode, swapchain != nullptr, queue != nullptr, everCaptured.load(std::memory_order_relaxed));
         return false;
     }
     GazeRoiFrameSync::FlushDeferred();
@@ -294,9 +285,6 @@ bool Present(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
     }
     if (!image || image->mode != mode || Clock::now() - image->captured > std::chrono::milliseconds(500))
     {
-        DLSSNR_DIAG("preview-wait", "reason=unpublished-mode-mismatch-or-stale requested={} published={} serial={} ageMs={}",
-            mode, image ? image->mode : 0, image ? image->serial : 0,
-            image ? std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - image->captured).count() : -1);
         return false;
     }
     ComPtr<ID3D12Device> device, sourceDevice;
@@ -383,7 +371,6 @@ bool Present(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue)
         LOG_ERROR("[DLSSNR_PREVIEW] presentation fence signal failed; preview disabled");
         return false;
     }
-    DLSSNR_DIAG("preview-submitted", "serial={} mode={} fence={} encoding={} backbuffer={}x{}", image->serial, mode, f.submitted, encoding, desc.Width, desc.Height);
     return true;
 }
 

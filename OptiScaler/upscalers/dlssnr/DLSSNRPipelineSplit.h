@@ -11,6 +11,7 @@ namespace DLSSNRPipelineSplit
 // Must run before the ordinary state/capture hooks on each implementation.
 // The option is latched at device initialization and requires a restart.
 void Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* probe);
+bool Active(); // Actual startup-latched routing state, independent of edited settings.
 bool Observe(ID3D12GraphicsCommandList* commands);
 // A native SDK can record through private driver interfaces or cached entry
 // points, outside our public-method hooks. Give the WHOLE SDK call the physical

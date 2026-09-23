@@ -82,8 +82,10 @@ struct Fixture
     }
     std::vector<std::byte> Read(ID3D12Resource* texture, D3D12_RESOURCE_STATES state, UINT bytes)
     {
-        auto desc=texture->GetDesc(); D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};UINT64 total=0;
-        device->GetCopyableFootprints(&desc,0,1,0,&fp,nullptr,nullptr,&total);
+        auto desc=texture->GetDesc(); D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {};UINT64 total=0, rowBytes=0;
+        device->GetCopyableFootprints(&desc,0,1,0,&fp,nullptr,&rowBytes,&total);
+        Require(rowBytes==desc.Width*bytes && fp.Offset+(desc.Height-1)*fp.Footprint.RowPitch+rowBytes<=total,
+                "readback pixel size disagrees with the resource plane footprint");
         auto output=Buffer(total,D3D12_HEAP_TYPE_READBACK);Begin();
         LateColor::Barrier(list.Get(),texture,state,D3D12_RESOURCE_STATE_COPY_SOURCE);
         D3D12_TEXTURE_COPY_LOCATION src {},dst {};
@@ -93,10 +95,12 @@ struct Fixture
         LateColor::Barrier(list.Get(),texture,D3D12_RESOURCE_STATE_COPY_SOURCE,state);Submit();
         void* mapped;Check(output->Map(0,nullptr,&mapped));std::vector<std::byte> result(desc.Width*desc.Height*bytes);
         for(UINT y=0;y<desc.Height;++y) memcpy(result.data()+y*desc.Width*bytes,
-            static_cast<std::byte*>(mapped)+y*fp.Footprint.RowPitch,desc.Width*bytes);
+            static_cast<std::byte*>(mapped)+fp.Offset+y*fp.Footprint.RowPitch,desc.Width*bytes);
         output->Unmap(0,nullptr);return result;
     }
 };
+
+
 float PQ(float nits)
 {
     float p=std::pow(nits/10000.f,2610.f/16384.f);
@@ -120,16 +124,22 @@ int main()
             ComPtr<ID3D12Resource> source, copy;
             Check(f.device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,
                 D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&source)));
-            D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {}; UINT64 total = 0;
-            f.device->GetCopyableFootprints(&desc,0,1,0,&fp,nullptr,nullptr,&total);
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp {}; UINT64 total = 0, rowBytes = 0;
+            f.device->GetCopyableFootprints(&desc,0,1,0,&fp,nullptr,&rowBytes,&total);
+            // Depth/stencil plane zero is copied independently. Its footprint
+            // can use four bytes per pixel even when the resource format uses eight.
+            Require(rowBytes%desc.Width==0, "guide plane has a fractional pixel footprint");
+            const UINT bytes = static_cast<UINT>(rowBytes/desc.Width);
+            Require((bytes==4 || (depth && bytes==8)) &&
+                    fp.Offset+(desc.Height-1)*fp.Footprint.RowPitch+rowBytes<=total,
+                    "guide upload exceeds the plane's copyable footprint");
             auto upload = f.Buffer(total,D3D12_HEAP_TYPE_UPLOAD); void* mapped;
             Check(upload->Map(0,nullptr,&mapped));
-            const UINT bytes = depth ? 8 : 4;
-            for (UINT y=0;y<1440;++y)
-                for (UINT x=0;x<2560;++x)
+            for (UINT y=0;y<desc.Height;++y)
+                for (UINT x=0;x<desc.Width;++x)
                 {
                     const UINT value[2] {0x3e800000u + (x+y)%256, 0};
-                    memcpy(static_cast<std::byte*>(mapped)+y*fp.Footprint.RowPitch+x*bytes,value,bytes);
+                    memcpy(static_cast<std::byte*>(mapped)+fp.Offset+y*fp.Footprint.RowPitch+x*bytes,value,bytes);
                 }
             upload->Unmap(0,nullptr);
             Require(EnsureGuide(f.device.Get(),source.Get(),copy,depth?"depth":"motion"),"guide allocation failed");
@@ -247,7 +257,7 @@ int main()
         UINT bad=123;Constants(list,true,1,1,&bad,4);Constants(list,true,1,1,constants+4,4);
         Signature(list,true,adapter.root.Get()); // same signature must preserve roots
         auto saved=Snapshot(list);Require(saved.has_value(),"complete state not captured");
-        Require(saved->compute.roots[1].constants.size()==10,"partial constants lost earlier writes");++checks;
+        Require(saved->compute.roots[1].constants->size()==10,"partial constants lost earlier writes");++checks;
         adapter.Read(f.device.Get(),list,scene.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,0);
         saved->Restore(list); // input PSO and both root tables restored
         LateColor::Barrier(list,scene.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);

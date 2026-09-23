@@ -13,6 +13,9 @@
 #include <ankerl/unordered_dense.h>
 #define LOG_TRACK(...) ((void)0)
 #include "descriptor-heap-production.h"
+static std::vector<std::unique_ptr<HeapInfo>> fgHeaps;
+static thread_local unsigned heapScans = 0;
+#include "descriptor-lookup-production.h"
 
 void Require(bool condition, const char* message)
 {
@@ -26,7 +29,7 @@ double Milliseconds(uint64_t ticks)
 }
 void ClearTracking()
 {
-    for (auto& shard : _resourceReferenceShards) shard.resources.clear();
+    for (auto& shard : _resourceReferenceShards) { shard.resources.clear(); shard.lifetimes.clear(); }
 }
 size_t References(ID3D12Resource* resource)
 {
@@ -53,8 +56,9 @@ void Validate(const std::vector<HeapInfo*>& heaps)
         {
             auto* resource = heap->info[i].buffer;
             auto index = heap->referencePositions[i];
-            if (!resource) Require(index == INVALID_RESOURCE_REFERENCE, "Cleared slot detached");
-            else
+            if (!resource || !heap->GetByIndex(i))
+                Require(index == INVALID_RESOURCE_REFERENCE, "Empty or expired slot detached");
+            else if (index != INVALID_RESOURCE_REFERENCE)
             {
                 auto& refs = ResourceReferences(resource).resources.at(resource);
                 Require(index < refs.size() && refs[index].info == &heap->info[i], "Forward slot membership");
@@ -63,6 +67,100 @@ void Validate(const std::vector<HeapInfo*>& heaps)
             }
         }
     Require(actual == expected, "No missing or duplicate reverse references");
+}
+void TestHeapLookup()
+{
+    using Role = ResTrack_Dx12::DescriptorCopyRole;
+    auto lookup = ResTrack_Dx12::GetHeapByCpuHandle;
+    constexpr UINT stride = 32, count = 64;
+    for (UINT i = 0; i < 38; ++i)
+    {
+        const SIZE_T start = 0x100000ull + 0x10000ull*i;
+        fgHeaps.push_back(std::make_unique<HeapInfo>(nullptr, start, start+stride*count, 0, 0, count, stride, 0));
+    }
+    gHeapGeneration.fetch_add(1);
+    for (const auto& heap : fgHeaps)
+        for (auto role : { Role::Source, Role::Destination })
+        {
+            Require(lookup(heap->cpuStart, role) == heap.get(), "First descriptor lookup");
+            Require(lookup(heap->cpuEnd-stride, role) == heap.get(), "Last descriptor lookup");
+            Require(lookup(heap->cpuStart-1, role) == nullptr, "Lower boundary excludes preceding gap");
+            Require(lookup(heap->cpuEnd, role) == nullptr, "Upper boundary is exclusive");
+        }
+    auto* source = fgHeaps[18].get();
+    auto* destination = fgHeaps.back().get();
+    gHeapGeneration.fetch_add(1);
+    heapScans = 0;
+    for (UINT i = 0; i < 1000; ++i)
+    {
+        const auto offset = (i % count)*stride;
+        Require(lookup(source->cpuStart+offset, Role::Source) == source, "Repeated source copy lookup");
+        Require(lookup(destination->cpuStart+offset, Role::Destination) == destination, "Repeated destination copy lookup");
+    }
+    Require(heapScans == 2, "Source and destination copies must not evict each other's cache");
+    gHeapGeneration.fetch_add(1);
+    heapScans = 0;
+    for (UINT i = 0; i < 1000; ++i)
+        for (UINT slot = 0; slot < 4; ++slot)
+        {
+            auto* heap = fgHeaps[18 + slot].get();
+            Require(lookup(heap->cpuStart + (i % count)*stride, Role::Source) == heap,
+                    "Alternating source heap lookup");
+            Require(lookup(heap->cpuStart + (i % count)*stride, Role::Destination) == heap,
+                    "Alternating destination heap lookup");
+        }
+    Require(heapScans == 8, "Four alternating heaps per role need one scan each");
+    for (auto role : { Role::Source, Role::Destination })
+    {
+        lookup(source->cpuStart, role);
+        source->version.fetch_add(1);
+        heapScans = 0;
+        Require(lookup(source->cpuStart, role) == source && heapScans == 1, "Version change invalidates cached slot");
+        source->active = false;
+        Require(lookup(source->cpuStart, role) == nullptr, "Retired heap cannot serve a cached lookup");
+        source->active = true;
+    }
+
+    std::barrier phase(5);
+    std::atomic<unsigned> failures { 0 };
+    std::vector<std::thread> workers;
+    for (UINT t = 0; t < 4; ++t) workers.emplace_back([&, t] {
+        for (UINT pass = 0; pass < 2; ++pass)
+        {
+            phase.arrive_and_wait();
+            auto* src = fgHeaps[2*t].get();
+            auto* dst = fgHeaps[2*t+1].get();
+            heapScans = 0;
+            for (UINT i = 0; i < 10000; ++i)
+            {
+                const auto offset = (i % count)*stride;
+                if (lookup(src->cpuStart+offset, Role::Source) != src ||
+                    lookup(dst->cpuStart+offset, Role::Destination) != dst) ++failures;
+            }
+            if (heapScans != 2) ++failures;
+            phase.arrive_and_wait();
+        }
+    });
+    phase.arrive_and_wait();
+    phase.arrive_and_wait();
+    // Replace storage at the same CPU handle ranges between copy batches, as
+    // during swapchain/HDR heap recreation. Workers retain their old TLS entries.
+    for (UINT i = 0; i < 8; ++i)
+    {
+        const auto start = fgHeaps[i]->cpuStart;
+        auto replacement = std::make_unique<HeapInfo>(nullptr, start, start+stride*count, 0, 0, count, stride, 0);
+        fgHeaps[i] = std::move(replacement);
+    }
+    gHeapGeneration.fetch_add(1, std::memory_order_release);
+    phase.arrive_and_wait();
+    phase.arrive_and_wait();
+    for (auto& worker : workers) worker.join();
+    Require(failures == 0, "Thread-local caches must survive heap retirement and same-range reuse");
+    const auto removedStart = source->cpuStart;
+    fgHeaps.clear();
+    gHeapGeneration.fetch_add(1);
+    Require(lookup(removedStart, Role::Source) == nullptr, "Removed heap lookup");
+    std::cout << "Heap cache: 2000 alternating lookups need 2 scans; boundaries, retirement, version, and 4-thread reuse passed.\n";
 }
 void TestMembership()
 {
@@ -89,8 +187,8 @@ void TestMembership()
         case 2: heap->ClearByCpuHandle(cpu); break;
         case 3: heap->ClearByGpuHandle(gpu); break;
         case 4: heap->SetByCpuHandle(cpu, {}); break;
-        case 5: // Copy views across heaps; reverse positions must not be copied.
-            heap->SetByCpuHandle(cpu, heaps[rng()%2]->info[rng()%1024]); break;
+        case 5: // Copy views across heaps without reverse-table updates.
+            heap->CopyByIndex(index, heaps[rng()%2], rng()%1024); break;
         case 6:
             if (auto* view = heap->GetByCpuHandle(cpu))
             {
@@ -99,7 +197,10 @@ void TestMembership()
                 const auto position = heap->referencePositions[index];
                 heap->SetByGpuHandle(gpu, changed);
                 Require(heap->info[index].width == changed.width &&
-                        heap->referencePositions[index] == position, "Same resource updates metadata only");
+                        (heap->referencePositions[index] == position ||
+                         (position == INVALID_RESOURCE_REFERENCE &&
+                          heap->referencePositions[index] != INVALID_RESOURCE_REFERENCE)),
+                        "Direct view update keeps or creates reverse membership");
             }
             break;
         }
@@ -129,6 +230,63 @@ void TestMembership()
     }
     Validate(heaps);
     std::cout << "Reverse index: 100000 randomized operations, cross-heap copies, release/heap teardown/reuse passed.\n";
+}
+void TestIndexPaths()
+{
+    for (const UINT stride : {16u, 32u, 40u})
+    {
+        constexpr UINT count = 64;
+        constexpr SIZE_T cpu = 0x10000, gpu = 0x20000;
+        HeapInfo source(nullptr, cpu, cpu+stride*count, gpu, gpu+stride*count, count, stride, 0);
+        HeapInfo destination(nullptr, cpu+0x10000, cpu+0x10000+stride*count, 0, 0, count, stride, 0);
+        ResourceInfo view {};
+        view.buffer = reinterpret_cast<ID3D12Resource*>(0x40000);
+        view.width = 1920;
+        for (UINT i = 0; i < count; ++i)
+        {
+            UINT index = UINT_MAX;
+            Require(source.GetCpuIndex(cpu+stride*i,index) && index==i, "Exact CPU handle index");
+            if (i%3 != 0) source.SetByIndex(i,view);
+            Require(source.GetByIndex(i)==source.GetByCpuHandle(cpu+stride*i) &&
+                    source.GetByIndex(i)==source.GetByGpuHandle(gpu+stride*i), "Indexed lookup matches handle paths");
+            destination.CopyByIndex(i, &source, i);
+            Require(destination.referencePositions[i] == INVALID_RESOURCE_REFERENCE,
+                    "Copied descriptor has no reverse membership");
+        }
+        Validate({&source,&destination});
+        const auto position = destination.referencePositions[1];
+        view.width = 2560;
+        destination.SetByIndex(1,view);
+        Require(destination.GetByIndex(1)->width==2560 &&
+                position==INVALID_RESOURCE_REFERENCE &&
+                destination.referencePositions[1]!=INVALID_RESOURCE_REFERENCE,
+                "Direct overwrite of a copy restores reverse membership");
+        UINT index = 123;
+        for (const SIZE_T invalid : {cpu-1, cpu+1, cpu+stride*count, SIZE_MAX})
+            Require(!source.GetCpuIndex(invalid,index), "Invalid or unaligned handle rejected");
+        const auto references = References(view.buffer);
+        destination.SetByIndex(count,view); destination.SetByIndex(SIZE_MAX,view);
+        destination.ClearByIndex(count); destination.ClearByIndex(SIZE_MAX);
+        Require(!destination.GetByIndex(count) && !destination.GetByIndex(SIZE_MAX) &&
+                References(view.buffer)==references, "Out-of-range index cannot change metadata");
+        {
+            auto& shard = ResourceReferences(view.buffer);
+            std::scoped_lock lock(shard.mutex);
+            Require(shard.Invalidate(view.buffer), "Resource release invalidates lifetime");
+        }
+        Require(source.GetByIndex(1)==nullptr && destination.GetByIndex(2)==nullptr,
+                "Resource release invalidates copied descriptors without reverse entries");
+        source.SetByIndex(1,view);
+        Require(source.GetByIndex(1)!=nullptr && destination.GetByIndex(2)==nullptr,
+                "Reused resource address does not revive an old copied descriptor");
+        source.active = false;
+        Require(!source.GetCpuIndex(cpu,index), "Retired heap cannot admit a range");
+        // Heap retirement must still remove the reverse references after marking inactive.
+        for (UINT i=0; i<count; ++i) { source.ClearByIndex(i); destination.ClearByIndex(i); }
+        Validate({&source,&destination});
+        Require(References(view.buffer)==0, "Indexed teardown detaches every descriptor");
+    }
+    std::cout << "Descriptor indices: aligned/non-power-of-two strides, bounds, copies, overwrite and retirement passed.\n";
 }
 void TestConcurrentRewrites()
 {
@@ -163,7 +321,9 @@ void TestConcurrentRewrites()
 }
 int main()
 {
+    TestHeapLookup();
     TestMembership();
+    TestIndexPaths();
     TestConcurrentRewrites();
     // No GPU work or fake COM calls: these are opaque identities used solely by
     // the unmodified production HeapInfo reverse-reference bookkeeping.

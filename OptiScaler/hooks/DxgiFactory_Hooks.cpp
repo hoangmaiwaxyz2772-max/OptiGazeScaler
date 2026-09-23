@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "DxgiFactory_Hooks.h"
+#include "DxgiAdapterSelection.h"
 
 #include "D3D11_Hooks.h"
 #include "D3D12_Hooks.h"
@@ -1830,12 +1831,21 @@ HRESULT DxgiFactoryHooks::EnumAdapters(IDXGIFactory* realFactory, UINT Adapter, 
         auto allGpus = IdentifyGpu::getAllGpus();
         if (Adapter < allGpus.size())
         {
-            LOG_DEBUG("Trying to select: {}", allGpus[Adapter].name);
-
-            auto gpuLuid = allGpus[Adapter].luid;
-
+            const auto gpuLuid = allGpus[Adapter].luid;
+            const auto preference = Config::Instance()->PreferDedicatedGpu.value_or_default()
+                ? DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE : DXGI_GPU_PREFERENCE_UNSPECIFIED;
             ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
-            result = o_EnumAdapterByLuid(factory6, gpuLuid, __uuidof(IDXGIAdapter), (void**) ppAdapter);
+            ScopedSkipSpoofing skipSpoofing {};
+            result = DxgiAdapterSelection::Enumerate(factory6, Adapter, preference, gpuLuid, ppAdapter,
+                [&](IDXGIAdapter** selected) {
+                    return o_EnumAdapterByGpuPreference != nullptr
+                            ? o_EnumAdapterByGpuPreference(factory6, Adapter, preference,
+                                                          __uuidof(IDXGIAdapter), (void**) selected)
+                            : E_NOINTERFACE;
+                },
+                [&](IDXGIAdapter** selected) {
+                    return o_EnumAdapterByLuid(factory6, gpuLuid, __uuidof(IDXGIAdapter), (void**) selected);
+                });
         }
         else
             result = DXGI_ERROR_NOT_FOUND;
@@ -1878,12 +1888,21 @@ HRESULT DxgiFactoryHooks::EnumAdapters1(IDXGIFactory1* realFactory, UINT Adapter
         auto allGpus = IdentifyGpu::getAllGpus();
         if (Adapter < allGpus.size())
         {
-            LOG_DEBUG("Trying to select: {}", allGpus[Adapter].name);
-
-            auto gpuLuid = allGpus[Adapter].luid;
-
+            const auto gpuLuid = allGpus[Adapter].luid;
+            const auto preference = Config::Instance()->PreferDedicatedGpu.value_or_default()
+                ? DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE : DXGI_GPU_PREFERENCE_UNSPECIFIED;
             ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
-            result = o_EnumAdapterByLuid(factory6, gpuLuid, __uuidof(IDXGIAdapter), (void**) ppAdapter);
+            ScopedSkipSpoofing skipSpoofing {};
+            result = DxgiAdapterSelection::Enumerate(factory6, Adapter, preference, gpuLuid, ppAdapter,
+                [&](IDXGIAdapter1** selected) {
+                    return o_EnumAdapterByGpuPreference != nullptr
+                            ? o_EnumAdapterByGpuPreference(factory6, Adapter, preference,
+                                                          __uuidof(IDXGIAdapter1), (void**) selected)
+                            : E_NOINTERFACE;
+                },
+                [&](IDXGIAdapter1** selected) {
+                    return o_EnumAdapterByLuid(factory6, gpuLuid, __uuidof(IDXGIAdapter1), (void**) selected);
+                });
         }
         else
             result = DXGI_ERROR_NOT_FOUND;

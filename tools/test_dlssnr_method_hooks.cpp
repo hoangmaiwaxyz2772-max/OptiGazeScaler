@@ -9,7 +9,6 @@
 #include <vector>
 #include "DLSSNRMethodHooks.h"
 #include "DLSSNRCommandState.h"
-#include "DLSSNRPipelineCapture.h"
 
 unsigned checks = 0;
 void Require(bool value, const char* message)
@@ -53,30 +52,7 @@ void PipelineChecks()
     Require(object.callbacks == 1 && object.runtime == 7 && object.driver == 7, "fence observation duplicated call");
     Require(FenceRuntime(&object, 2) == S_OK && object.callbacks == 2, "fence success forwarding");
     Require(ResultHook::Remove() == NO_ERROR, "fence hook removal");
-    using namespace DLSSNRPipelineTrace;
-    Capture capture;
-    capture.Add({"disabled"});
-    Require(capture.events.empty(), "disabled capture recorded event");
-    capture.Start();
-    for (size_t i = 0; i < Capture::Capacity + 5; ++i) capture.Add({"event"});
-    Require(capture.events.size() == Capture::Capacity && capture.lost == 5, "capture must bound storage and report overflow");
-    for (unsigned i = 1; i < Capture::PresentLimit; ++i)
-        Require(!capture.EndPresent(), "capture ended before present limit");
-    Require(capture.EndPresent() && capture.active, "present limit must retain tail recording");
-    Require(!capture.EndPresent(), "drain notification must occur only once");
-    capture.Start();
-    for (unsigned i = 0; i < Capture::PresentLimit; ++i) capture.EndPresent();
-    capture.Add({"post-present-signal"});
-    Require(capture.events.size() == 1 && capture.events[0].present == Capture::PresentLimit,
-            "final Present truncated tail signal");
-    capture.active = false;
-    const auto last = capture.ordinal;
-    capture.Add({"stopped"});
-    Require(capture.ordinal == last, "stopped capture accepted event");
-    capture.Start();
-    capture.Add({"rearmed"});
-    Require(capture.lost == 0 && capture.presents == 0 && capture.events.size() == 1 &&
-            capture.events[0].ordinal == 1, "rearmed capture retained prior session");
+
 }
 
 // Execute the production state-hook installers/callbacks with the host services
@@ -102,10 +78,10 @@ template<class T> struct rewrite_signature;
 template<class R, class C, class... A> struct rewrite_signature<R(C::*)(A...)>
 { using type = R(STDMETHODCALLTYPE*)(C*, A...); };
 #define LOG_ERROR(...) throw std::runtime_error("state hook detach failed")
-#define DLSSNR_DIAG(...) ((void)0)
+#define LOG_WARN(...) ((void)0)
 #include "late-state-hooks-production.h"
 #undef LOG_ERROR
-#undef DLSSNR_DIAG
+#undef LOG_WARN
 
 struct FakeList
 {
@@ -163,8 +139,8 @@ void StateChecks()
         Require(state->pipeline == pipeline && state->heapCount == 1 && state->heaps[0] == heap, "pipeline/heaps lost");
         Require(state->compute.signature == signature && state->graphics.signature == signature, "signatures lost");
         Require(state->compute.roots[0].value == 0x4000 && state->graphics.roots[0].value == 0x5000, "tables lost");
-        Require(state->compute.roots[1].constants.size() == 4 && state->compute.roots[1].constants[2] == 99 &&
-                state->graphics.roots[1].constants[3] == 88, "partial constants lost");
+        Require(state->compute.roots[1].constants->size() == 4 && (*state->compute.roots[1].constants)[2] == 99 &&
+                (*state->graphics.roots[1].constants)[3] == 88, "partial constants lost");
         Require(state->compute.roots[2].value == 0x6000 && state->graphics.roots[2].value == 0x7000, "CBVs lost");
         Require(state->compute.roots[3].value == 0x8000 && state->graphics.roots[3].value == 0x9000, "SRVs lost");
         Require(state->compute.roots[4].value == 0xA000 && state->graphics.roots[4].value == 0xB000, "UAVs lost");
@@ -195,8 +171,6 @@ void StateChecks()
 // Execute the production Reset/render-pass/creation callbacks with distinct
 // fake runtime and driver entries, including a driver forwarding to runtime.
 struct ResTrack_Dx12 { static bool ObserveCommandList(ID3D12GraphicsCommandList*); };
-namespace DLSSNRPipelineTrace { void ResetList(ID3D12GraphicsCommandList*) {} }
-struct { std::atomic<unsigned> renderPasses {0}; } lateStats;
 using PFN_Close = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*);
 using PFN_ExecuteBundle = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12GraphicsCommandList*);
 #include "late-lifecycle-hooks-production.h"
@@ -307,6 +281,61 @@ void ConstantChecks()
         Require(capture.calls==1 && capture.mask==~uint64_t(0) && capture.values==values,"64-DWORD restore failed");
     }
 }
+std::atomic<bool> observeBindings {false};
+bool ObserveBindings() { return observeBindings.load(std::memory_order_relaxed); }
+using ConditionalHook = DLSSNRMethodHooks::MethodHook<412, Fn, true, ObserveBindings>;
+using ConditionalResultHook = DLSSNRMethodHooks::MethodHook<414, ResultFn, true, ObserveBindings>;
+std::atomic<unsigned> nativeTlsScopes {0};
+__declspec(noinline) void ConditionalRuntime(Object* object, UINT value)
+{
+    object->runtime += value;
+    if (ConditionalHook::current) ++nativeTlsScopes;
+}
+__declspec(noinline) void ConditionalDriver(Object* object, UINT value)
+{
+    object->driver += value;
+    ConditionalRuntime(object,value);
+}
+void ConditionalCallback(Object* object, UINT value)
+{ ++object->callbacks; ConditionalHook::Forward(object,value); }
+__declspec(noinline) HRESULT ConditionalResult(Object* object, UINT value)
+{
+    object->runtime += value;
+    if (ConditionalResultHook::current) ++nativeTlsScopes;
+    return value ? S_FALSE : E_INVALIDARG;
+}
+HRESULT ConditionalResultCallback(Object* object, UINT value)
+{ ++object->callbacks; return ConditionalResultHook::Forward(object,value); }
+void ConditionalChecks()
+{
+    Require(ConditionalHook::Install(reinterpret_cast<void*>(ConditionalRuntime),ConditionalCallback)==NO_ERROR &&
+            ConditionalHook::Install(reinterpret_cast<void*>(ConditionalDriver),ConditionalCallback)==NO_ERROR &&
+            ConditionalResultHook::Install(reinterpret_cast<void*>(ConditionalResult),ConditionalResultCallback)==NO_ERROR,
+            "conditional hook installation");
+    Object object;
+    ConditionalRuntime(&object,1); ConditionalDriver(&object,2);
+    Require(ConditionalResult(&object,0)==E_INVALIDARG && object.runtime==3 && object.driver==2 &&
+            object.callbacks==0 && nativeTlsScopes==0, "inactive observer used callback/TLS or changed native calls");
+    observeBindings = true;
+    ConditionalRuntime(&object,1); ConditionalDriver(&object,2);
+    Require(ConditionalResult(&object,1)==S_FALSE && object.runtime==7 && object.driver==4 &&
+            object.callbacks==3 && nativeTlsScopes==3, "observer did not resume once per logical method call");
+    observeBindings = false;
+    std::atomic<bool> correct {true};
+    std::vector<std::thread> threads;
+    for (UINT t=0;t<4;++t) threads.emplace_back([&] {
+        Object local;
+        for (UINT i=0;i<1000;++i) { ConditionalRuntime(&local,1); ConditionalDriver(&local,2); }
+        if (local.runtime!=3000 || local.driver!=2000 || local.callbacks) correct=false;
+    });
+    for (auto& thread:threads) thread.join();
+    Require(correct && nativeTlsScopes==3, "inactive observer bypass failed across threads");
+    Require(ConditionalHook::Remove()==NO_ERROR && ConditionalResultHook::Remove()==NO_ERROR,
+            "conditional hook removal");
+}
+
+
+
 int main()
 {
     try
@@ -368,6 +397,7 @@ int main()
         Runtime(&object, 1);
         Require(object.callbacks == 4, "reinstall callback");
         Require(Hook::Remove() == NO_ERROR, "final detach");
+        ConditionalChecks();
         std::cout << "Method-entry/state checks passed: " << checks << "; 120000 concurrent calls.\n";
         return 0;
     }

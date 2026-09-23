@@ -2,6 +2,7 @@
 
 ## OptiGazeScaler — Unreleased
 
+* Reduce CPU overhead in the HUDless capture path and fix additional CPU overhead with HDR enabled.
 * Add full-frame and gaze-region DLSS5 / DLSS NR support on D3D12 DLSS SR and RR paths, with an external NR module.
 * Add independent NR ROI size, reduced-resolution inference, reconstruction and gaze-motion handling.
 * Organize the main DLSS5 settings around injection mode, direct preview and independent gaze controls; show HUDfix capture settings on the HUDfix route.

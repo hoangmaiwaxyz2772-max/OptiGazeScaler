@@ -2,7 +2,6 @@
 #include <upscalers/dlssnr/DLSSNRPipelineSplit.h>
 #include <upscalers/dlssnr/DLSSNRCommandState.h>
 #include <upscalers/dlssnr/DLSSNRMethodHooks.h>
-#include <upscalers/dlssnr/DLSSNRDiagnostics.h>
 #include <upscalers/dlssnr/DLSSNRLatePass.h>
 #include "D3D12_Hooks.h"
 
@@ -218,116 +217,107 @@ static thread_local bool isUpscalerActive = false;
 // Discover from Reset/OM as well as the upscaler's real command list.
 namespace
 {
-using LateStateSetPipelineState = DLSSNRMethodHooks::MethodHook<125, PFN_SetPipelineState>;
+static bool CaptureLateState()
+{
+    // Publish off/on transitions even when bypassing callbacks, so an
+    // incomplete recording is still rejected until its next Reset.
+    return DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) &&
+           !isUpscalerActive && !DLSSNRCommandState::suppress;
+}
+using LateStateSetPipelineState = DLSSNRMethodHooks::MethodHook<125, PFN_SetPipelineState, true, CaptureLateState>;
 static void TrackSetPipelineState(ID3D12GraphicsCommandList* commands, ID3D12PipelineState* value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Pipeline(commands, value);
+    DLSSNRCommandState::Pipeline(commands, value);
     LateStateSetPipelineState::Forward(commands, value);
 }
-using LateStateSetDescriptorHeaps = DLSSNRMethodHooks::MethodHook<128, PFN_SetDescriptorHeaps>;
+using LateStateSetDescriptorHeaps = DLSSNRMethodHooks::MethodHook<128, PFN_SetDescriptorHeaps, true, CaptureLateState>;
 static void TrackSetDescriptorHeaps(ID3D12GraphicsCommandList* commands, UINT count, ID3D12DescriptorHeap* const* heaps)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Heaps(commands, count, heaps);
+    DLSSNRCommandState::Heaps(commands, count, heaps);
     LateStateSetDescriptorHeaps::Forward(commands, count, heaps);
 }
-using LateStateSetComputeRootSignature = DLSSNRMethodHooks::MethodHook<129, PFN_SetComputeRootSignature>;
+using LateStateSetComputeRootSignature = DLSSNRMethodHooks::MethodHook<129, PFN_SetComputeRootSignature, true, CaptureLateState>;
 static void TrackSetComputeRootSignature(ID3D12GraphicsCommandList* commands, ID3D12RootSignature* value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Signature(commands, true, value);
+    DLSSNRCommandState::Signature(commands, true, value);
     LateStateSetComputeRootSignature::Forward(commands, value);
 }
-using LateStateSetComputeRootDescriptorTable = DLSSNRMethodHooks::MethodHook<131, PFN_SetComputeRootDescriptorTable>;
+using LateStateSetComputeRootDescriptorTable = DLSSNRMethodHooks::MethodHook<131, PFN_SetComputeRootDescriptorTable, true, CaptureLateState>;
 static void TrackSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_DESCRIPTOR_HANDLE value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::Table, value.ptr);
+    DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::Table, value.ptr);
     LateStateSetComputeRootDescriptorTable::Forward(commands, index, value);
 }
-using LateStateSetComputeRoot32BitConstant = DLSSNRMethodHooks::MethodHook<133, PFN_SetComputeRoot32BitConstant>;
+using LateStateSetComputeRoot32BitConstant = DLSSNRMethodHooks::MethodHook<133, PFN_SetComputeRoot32BitConstant, true, CaptureLateState>;
 static void TrackSetComputeRoot32BitConstant(ID3D12GraphicsCommandList* commands, UINT index, UINT value, UINT offset)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commands, true, index, 1, &value, offset);
+    DLSSNRCommandState::Constants(commands, true, index, 1, &value, offset);
     LateStateSetComputeRoot32BitConstant::Forward(commands, index, value, offset);
 }
-using LateStateSetComputeRoot32BitConstants = DLSSNRMethodHooks::MethodHook<135, PFN_SetComputeRoot32BitConstants>;
+using LateStateSetComputeRoot32BitConstants = DLSSNRMethodHooks::MethodHook<135, PFN_SetComputeRoot32BitConstants, true, CaptureLateState>;
 static void TrackSetComputeRoot32BitConstants(ID3D12GraphicsCommandList* commands, UINT index, UINT count, const void* values, UINT offset)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commands, true, index, count, values, offset);
+    DLSSNRCommandState::Constants(commands, true, index, count, values, offset);
     LateStateSetComputeRoot32BitConstants::Forward(commands, index, count, values, offset);
 }
-using LateStateSetComputeRootConstantBufferView = DLSSNRMethodHooks::MethodHook<137, PFN_SetComputeRootConstantBufferView>;
+using LateStateSetComputeRootConstantBufferView = DLSSNRMethodHooks::MethodHook<137, PFN_SetComputeRootConstantBufferView, true, CaptureLateState>;
 static void TrackSetComputeRootConstantBufferView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::CBV, value);
+    DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::CBV, value);
     LateStateSetComputeRootConstantBufferView::Forward(commands, index, value);
 }
-using LateStateSetComputeRootShaderResourceView = DLSSNRMethodHooks::MethodHook<139, PFN_SetComputeRootShaderResourceView>;
+using LateStateSetComputeRootShaderResourceView = DLSSNRMethodHooks::MethodHook<139, PFN_SetComputeRootShaderResourceView, true, CaptureLateState>;
 static void TrackSetComputeRootShaderResourceView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::SRV, value);
+    DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::SRV, value);
     LateStateSetComputeRootShaderResourceView::Forward(commands, index, value);
 }
-using LateStateSetComputeRootUnorderedAccessView = DLSSNRMethodHooks::MethodHook<141, PFN_SetComputeRootUnorderedAccessView>;
+using LateStateSetComputeRootUnorderedAccessView = DLSSNRMethodHooks::MethodHook<141, PFN_SetComputeRootUnorderedAccessView, true, CaptureLateState>;
 static void TrackSetComputeRootUnorderedAccessView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::UAV, value);
+    DLSSNRCommandState::Value(commands, true, index, DLSSNRCommandState::Kind::UAV, value);
     LateStateSetComputeRootUnorderedAccessView::Forward(commands, index, value);
 }
-using LateStateSetGraphicsRootSignature = DLSSNRMethodHooks::MethodHook<130, PFN_SetGraphicsRootSignature>;
+using LateStateSetGraphicsRootSignature = DLSSNRMethodHooks::MethodHook<130, PFN_SetGraphicsRootSignature, true, CaptureLateState>;
 static void TrackSetGraphicsRootSignature(ID3D12GraphicsCommandList* commands, ID3D12RootSignature* value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Signature(commands, false, value);
+    DLSSNRCommandState::Signature(commands, false, value);
     LateStateSetGraphicsRootSignature::Forward(commands, value);
 }
-using LateStateSetGraphicsRootDescriptorTable = DLSSNRMethodHooks::MethodHook<132, PFN_SetGraphicsRootDescriptorTable>;
+using LateStateSetGraphicsRootDescriptorTable = DLSSNRMethodHooks::MethodHook<132, PFN_SetGraphicsRootDescriptorTable, true, CaptureLateState>;
 static void TrackSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_DESCRIPTOR_HANDLE value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::Table, value.ptr);
+    DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::Table, value.ptr);
     LateStateSetGraphicsRootDescriptorTable::Forward(commands, index, value);
 }
-using LateStateSetGraphicsRoot32BitConstant = DLSSNRMethodHooks::MethodHook<134, PFN_SetGraphicsRoot32BitConstant>;
+using LateStateSetGraphicsRoot32BitConstant = DLSSNRMethodHooks::MethodHook<134, PFN_SetGraphicsRoot32BitConstant, true, CaptureLateState>;
 static void TrackSetGraphicsRoot32BitConstant(ID3D12GraphicsCommandList* commands, UINT index, UINT value, UINT offset)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commands, false, index, 1, &value, offset);
+    DLSSNRCommandState::Constants(commands, false, index, 1, &value, offset);
     LateStateSetGraphicsRoot32BitConstant::Forward(commands, index, value, offset);
 }
-using LateStateSetGraphicsRoot32BitConstants = DLSSNRMethodHooks::MethodHook<136, PFN_SetGraphicsRoot32BitConstants>;
+using LateStateSetGraphicsRoot32BitConstants = DLSSNRMethodHooks::MethodHook<136, PFN_SetGraphicsRoot32BitConstants, true, CaptureLateState>;
 static void TrackSetGraphicsRoot32BitConstants(ID3D12GraphicsCommandList* commands, UINT index, UINT count, const void* values, UINT offset)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Constants(commands, false, index, count, values, offset);
+    DLSSNRCommandState::Constants(commands, false, index, count, values, offset);
     LateStateSetGraphicsRoot32BitConstants::Forward(commands, index, count, values, offset);
 }
-using LateStateSetGraphicsRootConstantBufferView = DLSSNRMethodHooks::MethodHook<138, PFN_SetGraphicsRootConstantBufferView>;
+using LateStateSetGraphicsRootConstantBufferView = DLSSNRMethodHooks::MethodHook<138, PFN_SetGraphicsRootConstantBufferView, true, CaptureLateState>;
 static void TrackSetGraphicsRootConstantBufferView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::CBV, value);
+    DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::CBV, value);
     LateStateSetGraphicsRootConstantBufferView::Forward(commands, index, value);
 }
-using LateStateSetGraphicsRootShaderResourceView = DLSSNRMethodHooks::MethodHook<140, PFN_SetGraphicsRootShaderResourceView>;
+using LateStateSetGraphicsRootShaderResourceView = DLSSNRMethodHooks::MethodHook<140, PFN_SetGraphicsRootShaderResourceView, true, CaptureLateState>;
 static void TrackSetGraphicsRootShaderResourceView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::SRV, value);
+    DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::SRV, value);
     LateStateSetGraphicsRootShaderResourceView::Forward(commands, index, value);
 }
-using LateStateSetGraphicsRootUnorderedAccessView = DLSSNRMethodHooks::MethodHook<142, PFN_SetGraphicsRootUnorderedAccessView>;
+using LateStateSetGraphicsRootUnorderedAccessView = DLSSNRMethodHooks::MethodHook<142, PFN_SetGraphicsRootUnorderedAccessView, true, CaptureLateState>;
 static void TrackSetGraphicsRootUnorderedAccessView(ID3D12GraphicsCommandList* commands, UINT index, D3D12_GPU_VIRTUAL_ADDRESS value)
 {
-    if (DLSSNRCommandState::CaptureEnabled(DLSSNRLatePass::Enabled()) && !isUpscalerActive)
-        DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::UAV, value);
+    DLSSNRCommandState::Value(commands, false, index, DLSSNRCommandState::Kind::UAV, value);
     LateStateSetGraphicsRootUnorderedAccessView::Forward(commands, index, value);
 }
 }
@@ -339,7 +329,7 @@ static bool InstallLateStateMethod(void* target, typename Hook::Function callbac
     const auto result = Hook::Install(target, callback, &added);
     changed |= added;
     if (result != NO_ERROR)
-        DLSSNR_DIAG("state-hook-failed", "method={} result={}", name, result);
+        LOG_WARN("[DLSSNR_LATE] state hook={} failed with {}", name, result);
     return result == NO_ERROR;
 }
 

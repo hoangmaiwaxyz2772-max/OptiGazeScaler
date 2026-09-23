@@ -256,7 +256,7 @@ void ResetRawInputSanitizeCacheLocked()
 
 RawSanitizeAction GetRawKeyboardSanitizeActionLocked(const RAWKEYBOARD& keyboard)
 {
-    if (!_state.MenuVisible || !_state.BlockKeyboard)
+    if (!ShouldBlockKeyboardInputLocked())
         return RawSanitizeAction::Pass;
 
     const int vk = NormalizeRawKeyboardVirtualKey(keyboard);
@@ -269,7 +269,11 @@ RawSanitizeAction GetRawKeyboardSanitizeActionLocked(const RAWKEYBOARD& keyboard
 
     if (!released)
     {
-        _state.RawKeyboardBlockedDown[vk] = true;
+        // A repeat arriving after the menu opens is not a blocked press if the key was already held.
+        // In that case the game saw the original press and must still receive the matching release.
+        if (!_state.Keys[vk].Down)
+            _state.RawKeyboardBlockedDown[vk] = true;
+
         return RawSanitizeAction::SanitizeAll;
     }
 
@@ -308,7 +312,7 @@ RawMouseSanitizeResult GetRawMouseSanitizeActionLocked(const RAWMOUSE& mouse)
 {
     RawMouseSanitizeResult result {};
 
-    if (!_state.MenuVisible || !_state.BlockMouse)
+    if (!ShouldBlockMouseInputLocked())
         return result;
 
     const USHORT flags = mouse.usButtonFlags;
@@ -541,31 +545,31 @@ void UpdateStateFromRawMouseLocked(const RAWMOUSE& mouse)
     const DWORD time = GetTickCount();
 
     if (mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)
-        SetMouseDown(0, time, _state.BlockMouse);
+        SetMouseDown(0, time, ShouldBlockMouseInputLocked());
 
     if (mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP)
         SetMouseUpStateOnly(0, time);
 
     if (mouse.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)
-        SetMouseDown(1, time, _state.BlockMouse);
+        SetMouseDown(1, time, ShouldBlockMouseInputLocked());
 
     if (mouse.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)
         SetMouseUpStateOnly(1, time);
 
     if (mouse.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_DOWN)
-        SetMouseDown(2, time, _state.BlockMouse);
+        SetMouseDown(2, time, ShouldBlockMouseInputLocked());
 
     if (mouse.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP)
         SetMouseUpStateOnly(2, time);
 
     if (mouse.usButtonFlags & RI_MOUSE_BUTTON_4_DOWN)
-        SetMouseDown(3, time, _state.BlockMouse);
+        SetMouseDown(3, time, ShouldBlockMouseInputLocked());
 
     if (mouse.usButtonFlags & RI_MOUSE_BUTTON_4_UP)
         SetMouseUpStateOnly(3, time);
 
     if (mouse.usButtonFlags & RI_MOUSE_BUTTON_5_DOWN)
-        SetMouseDown(4, time, _state.BlockMouse);
+        SetMouseDown(4, time, ShouldBlockMouseInputLocked());
 
     if (mouse.usButtonFlags & RI_MOUSE_BUTTON_5_UP)
         SetMouseUpStateOnly(4, time);
@@ -623,7 +627,7 @@ void UpdateStateFromRawKeyboardLocked(const RAWKEYBOARD& keyboard)
     if (released)
         SetKeyUpStateOnly(vk, GetTickCount());
     else
-        SetKeyDown(vk, GetTickCount(), _state.BlockKeyboard);
+        SetKeyDown(vk, GetTickCount(), ShouldBlockKeyboardInputLocked());
 }
 
 void UpdateStateFromRawInputLocked(const RAWINPUT& input)
@@ -652,10 +656,10 @@ void UpdateStateFromRawInputLocked(const RAWINPUT& input)
     }
 }
 
-void HandleRawInputLocked(HRAWINPUT rawInputHandle)
+bool HandleRawInputLocked(HRAWINPUT rawInputHandle)
 {
     if (rawInputHandle == nullptr)
-        return;
+        return false;
 
     UINT size = 0;
 
@@ -665,11 +669,11 @@ void HandleRawInputLocked(HRAWINPUT rawInputHandle)
         const UINT queryResult = o_GetRawInputData(rawInputHandle, RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER));
 
         if (queryResult != 0)
-            return;
+            return false;
     }
 
     if (size == 0)
-        return;
+        return false;
 
     std::vector<BYTE> buffer(size);
 
@@ -682,15 +686,29 @@ void HandleRawInputLocked(HRAWINPUT rawInputHandle)
             o_GetRawInputData(rawInputHandle, RID_INPUT, buffer.data(), &readSize, sizeof(RAWINPUTHEADER));
 
         if (readResult == static_cast<UINT>(-1))
-            return;
+            return false;
 
         if (readResult != size)
-            return;
+            return false;
     }
 
     const RAWINPUT* input = reinterpret_cast<const RAWINPUT*>(buffer.data());
 
+    // Decide before updating aggregate state: the blocked-down bookkeeping describes the state
+    // before this packet. The same decision is cached by HRAWINPUT and reused by GetRawInputData.
+    const RawInputSanitizeDecision decision = GetRawInputSanitizeDecisionLocked(rawInputHandle, *input);
+
+    // A fully-passed keyboard packet can contain an owed key-up. A partially-sanitized mouse packet
+    // can contain owed button-up(s) while movement/new presses are removed. In both cases WM_INPUT
+    // must reach the game so it gets a chance to call GetRawInputData and receive the sanitized data.
+    const bool mustReachGame =
+        (input->header.dwType == RIM_TYPEKEYBOARD && decision.Action == RawSanitizeAction::Pass) ||
+        (input->header.dwType == RIM_TYPEMOUSE &&
+         decision.Action == RawSanitizeAction::SanitizeMouseKeepAllowedButtonUps);
+
     UpdateStateFromRawInputLocked(*input);
+
+    return mustReachGame;
 }
 
 void ApplyRawInputSanitizeActionLocked(RAWINPUT& input, RawSanitizeAction action, USHORT allowedMouseButtonUpFlags)

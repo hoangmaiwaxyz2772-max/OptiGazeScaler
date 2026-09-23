@@ -26,11 +26,7 @@ $start = $tracking.IndexOf('bool ResTrack_Dx12::CheckResource(')
 $end = $tracking.IndexOf('inline static IID streamlineRiid', $start)
 if ($start -lt 0 -or $end -le $start) { throw 'Metadata admission extraction failed' }
 $descriptorSource += $tracking.Substring($start, $end - $start)
-$start = $tracking.IndexOf('void ResTrack_Dx12::FillResourceInfo(')
-$end = $tracking.IndexOf('bool ResTrack_Dx12::IsHudFixActive()', $start)
-if ($start -lt 0 -or $end -le $start) { throw 'Resource metadata extraction failed' }
-$descriptorSource += $tracking.Substring($start, $end - $start)
-$start = $tracking.IndexOf('static bool IsDefaultTexture2DView(')
+$start = $tracking.IndexOf('void ResTrack_Dx12::hkCreateRenderTargetView(')
 $end = $tracking.IndexOf('#pragma endregion', $start)
 if ($start -lt 0 -or $end -le $start) { throw 'View hook extraction failed' }
 $descriptorSource += $tracking.Substring($start, $end - $start)

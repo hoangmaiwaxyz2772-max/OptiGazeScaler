@@ -2,7 +2,6 @@
 #include "DLSSNRPipelineSplit.h"
 #include "DLSSNRCommandState.h"
 #include "DLSSNRMethodHooks.h"
-#include "DLSSNRPipelineTrace.h"
 #include "DLSSNRPipelineAccess.h"
 #include <NVNGX_Parameter.h>
 #include <State.h>
@@ -254,7 +253,6 @@ struct Route<Slot, P, Member, void(STDMETHODCALLTYPE Object::*)(Args...)>
                     (static_cast<Object*>(segment->prefix.Get())->*Member)(args...);
                 }
                 ResetIndirectState(list, info, true);
-                DLSSNRPipelineTrace::Mark("indirect-prefix-record", list, signature, info.count);
                 static std::atomic<UINT64> routed {0};
                 const auto count = ++routed;
                 if (count <= 3 || count % 3000 == 0)
@@ -1245,7 +1243,6 @@ NativeRecording::NativeRecording(ID3D12GraphicsCommandList* commands, const NVSD
     if (count <= 3 || count % 300 == 0)
         spdlog::info("{} [DLSSNR_SPLIT] native-prefix={} logical=0x{:X} physical=0x{:X} scope=whole-sdk-call", __FUNCTION__,
                  count, (uintptr_t)native, (uintptr_t)target);
-    DLSSNRPipelineTrace::Mark("native-prefix-record", native, target, count);
 }
 
 NativeRecording::~NativeRecording()
@@ -1323,6 +1320,8 @@ bool Observe(ID3D12GraphicsCommandList* commands)
              (uintptr_t)table, version, ready, hooksReady, (UINT)commands->GetType());
     return ready;
 }
+
+bool Active() { return enabled.load(std::memory_order_relaxed); }
 
 void Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* probe)
 {
@@ -1427,7 +1426,6 @@ bool BeforeNR(ID3D12GraphicsCommandList* commands, ID3D12Resource* scene, UINT64
             spdlog::info("{} [DLSSNR_SPLIT] nr-boundary={} frame={} prefix=0x{:X} tail=0x{:X} scene=0x{:X}", __FUNCTION__,
                      cuts, serial, (uintptr_t)segment->prefix.Get(), (uintptr_t)commands, (uintptr_t)scene);
     }
-    DLSSNRPipelineTrace::Mark("nr-prefix-sealed", commands, segment->prefix.Get(), serial);
     return true;
 }
 } // namespace DLSSNRPipelineSplit

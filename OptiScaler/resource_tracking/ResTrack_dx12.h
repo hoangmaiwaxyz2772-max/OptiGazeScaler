@@ -137,13 +137,21 @@ struct alignas(CACHE_LINE_SIZE) ResourceReferenceShard
     std::mutex mutex;
 #endif
     ankerl::unordered_dense::map<ID3D12Resource*, std::vector<ResourceReference>> resources;
+    ankerl::unordered_dense::map<ID3D12Resource*, std::shared_ptr<std::atomic<bool>>> lifetimes;
     // Caller holds mutex. Invalidation and removal from the index must happen
     // together so a heap cannot free/reuse a slot before it is cleared.
     bool Invalidate(ID3D12Resource* resource)
     {
+        bool found = false;
+        if (auto lifetime = lifetimes.find(resource); lifetime != lifetimes.end())
+        {
+            lifetime->second->store(false, std::memory_order_release);
+            lifetimes.erase(lifetime);
+            found = true;
+        }
         auto it = resources.find(resource);
         if (it == resources.end())
-            return false;
+            return found;
         for (auto& ref : it->second)
         {
             ref.info->buffer = nullptr;
@@ -178,6 +186,7 @@ struct HeapInfo
     UINT increment = 0;
     UINT type = 0;
     std::shared_ptr<ResourceInfo[]> info;
+    std::unique_ptr<std::shared_ptr<std::atomic<bool>>[]> lifetimes;
     std::unique_ptr<UINT[]> referencePositions;
     UINT lastOffset = 0;
     bool active = true;
@@ -187,6 +196,7 @@ struct HeapInfo
              UINT numResources, UINT increment, UINT type)
         : heap(heap), cpuStart(cpuStart), cpuEnd(cpuEnd), gpuStart(gpuStart), gpuEnd(gpuEnd),
           numDescriptors(numResources), increment(increment), type(type), info(new ResourceInfo[numResources]),
+          lifetimes(new std::shared_ptr<std::atomic<bool>>[numResources]),
           referencePositions(new UINT[numResources])
     {
         static std::atomic<uint64_t> globalHeapVersion { 1 };
@@ -202,7 +212,7 @@ struct HeapInfo
     void DetachFromOldResource(SIZE_T index) const
     {
         auto* resource = info[index].buffer;
-        if (resource == nullptr)
+        if (resource == nullptr || referencePositions[index] == INVALID_RESOURCE_REFERENCE)
             return;
 
         auto& shard = ResourceReferences(resource);
@@ -234,6 +244,10 @@ struct HeapInfo
         LOG_TRACK("Heap: {:X}, Index: {}, Resource: {:X}, Res: {}x{}, Format: {}", (size_t) this, index,
                   (size_t) info[index].buffer, info[index].width, info[index].height, (UINT) info[index].format);
         auto& vec = shard.resources[info[index].buffer];
+        auto& lifetime = shard.lifetimes[info[index].buffer];
+        if (!lifetime)
+            lifetime = std::make_shared<std::atomic<bool>>(true);
+        lifetimes[index] = lifetime;
         if (referencePositions[index] == INVALID_RESOURCE_REFERENCE)
         {
             const auto position = static_cast<UINT>(vec.size());
@@ -242,16 +256,29 @@ struct HeapInfo
         }
     }
 
-    ResourceInfo* GetByCpuHandle(SIZE_T cpuHandle) const
+    bool GetCpuIndex(SIZE_T cpuHandle, UINT& index) const
     {
-        auto index = (cpuHandle - cpuStart) / increment;
+        if (!active || increment == 0 || cpuHandle < cpuStart || cpuHandle >= cpuEnd)
+            return false;
 
+        const auto offset = cpuHandle - cpuStart;
+        const auto slot = offset / increment;
+        if (slot >= numDescriptors || offset % increment != 0)
+            return false;
+
+        index = static_cast<UINT>(slot);
+        return true;
+    }
+
+    ResourceInfo* GetByIndex(SIZE_T index) const
+    {
         if (index >= numDescriptors)
             return nullptr;
 
         // std::shared_lock<std::shared_mutex> lock(mutex);
 
-        if (info[index].buffer == nullptr)
+        if (info[index].buffer == nullptr || !lifetimes[index] ||
+            !lifetimes[index]->load(std::memory_order_acquire))
             return nullptr;
 
 #ifdef DEBUG_TRACKING
@@ -259,116 +286,108 @@ struct HeapInfo
 #endif
 
         return &info[index];
+    }
+
+    ResourceInfo* GetByCpuHandle(SIZE_T cpuHandle) const
+    {
+        return GetByIndex((cpuHandle - cpuStart) / increment);
     }
 
     ResourceInfo* GetByGpuHandle(SIZE_T gpuHandle) const
     {
-        auto index = (gpuHandle - gpuStart) / increment;
+        return GetByIndex((gpuHandle - gpuStart) / increment);
+    }
 
+    void SetByIndex(SIZE_T index, ResourceInfo setInfo) const
+    {
         if (index >= numDescriptors)
-            return nullptr;
+            return;
 
-        // std::shared_lock<std::shared_mutex> lock(mutex);
-
-        if (info[index].buffer == nullptr)
-            return nullptr;
+        // std::unique_lock<std::shared_mutex> lock(mutex);
 
 #ifdef DEBUG_TRACKING
-        TestResource(&info[index]);
+        TestResource(&setInfo);
 #endif
+        if (info[index].buffer != setInfo.buffer ||
+            referencePositions[index] == INVALID_RESOURCE_REFERENCE)
+        {
+            DetachFromOldResource(index);
+            info[index] = setInfo;
+            lifetimes[index].reset();
+            if (setInfo.buffer != nullptr)
+                AttachToNewResource(index);
+        }
+        else
+        {
+            info[index] = setInfo;
+        }
+    }
 
-        return &info[index];
+    void CopyByIndex(SIZE_T destination, const HeapInfo* source, SIZE_T sourceIndex) const
+    {
+        if (destination >= numDescriptors)
+            return;
+        const auto* sourceInfo = source != nullptr ? source->GetByIndex(sourceIndex) : nullptr;
+        if (sourceInfo == nullptr)
+        {
+            // Most game descriptors have no HUDless/NR metadata. The same
+            // empty slots are copied every frame; avoid a shared_ptr reset
+            // and cache-line writes when the destination is empty already.
+            if (info[destination].buffer != nullptr || lifetimes[destination] ||
+                referencePositions[destination] != INVALID_RESOURCE_REFERENCE ||
+                info[destination].lastUsedFrame != 0)
+                ClearByIndex(destination);
+            return;
+        }
+
+        // Copy metadata and the source resource's lifetime, not its membership
+        // in the reverse-reference table. Release invalidates every copy at once.
+        const auto copiedInfo = *sourceInfo;
+        const auto copiedLifetime = source->lifetimes[sourceIndex];
+        DetachFromOldResource(destination);
+        info[destination] = copiedInfo;
+        lifetimes[destination] = copiedLifetime;
+        referencePositions[destination] = INVALID_RESOURCE_REFERENCE;
     }
 
     void SetByCpuHandle(SIZE_T cpuHandle, ResourceInfo setInfo) const
     {
-        auto index = (cpuHandle - cpuStart) / increment;
-
-        if (index >= numDescriptors)
-            return;
-
-        // std::unique_lock<std::shared_mutex> lock(mutex);
-
-#ifdef DEBUG_TRACKING
-        TestResource(&setInfo);
-#endif
-        if (info[index].buffer != setInfo.buffer)
-        {
-            DetachFromOldResource(index);
-            info[index] = setInfo;
-            AttachToNewResource(index);
-        }
-        else
-        {
-            info[index] = setInfo;
-        }
+        SetByIndex((cpuHandle - cpuStart) / increment, setInfo);
     }
 
     void SetByGpuHandle(SIZE_T gpuHandle, ResourceInfo setInfo) const
     {
-        auto index = (gpuHandle - gpuStart) / increment;
+        SetByIndex((gpuHandle - gpuStart) / increment, setInfo);
+    }
 
+    void ClearByIndex(SIZE_T index) const
+    {
         if (index >= numDescriptors)
             return;
 
         // std::unique_lock<std::shared_mutex> lock(mutex);
 
-#ifdef DEBUG_TRACKING
-        TestResource(&setInfo);
-#endif
+        if (info[index].buffer != nullptr)
+        {
+            LOG_TRACK("Resource: {:X}, Res: {}x{}, Format: {}", (size_t) info[index].buffer, info[index].width,
+                      info[index].height, (UINT) info[index].format);
 
-        if (info[index].buffer != setInfo.buffer)
-        {
             DetachFromOldResource(index);
-            info[index] = setInfo;
-            AttachToNewResource(index);
         }
-        else
-        {
-            info[index] = setInfo;
-        }
+
+        info[index].buffer = nullptr;
+        info[index].lastUsedFrame = 0;
+        lifetimes[index].reset();
     }
 
     void ClearByCpuHandle(SIZE_T cpuHandle) const
     {
-        auto index = (cpuHandle - cpuStart) / increment;
-
-        if (index >= numDescriptors)
-            return;
-
-        // std::unique_lock<std::shared_mutex> lock(mutex);
-
-        if (info[index].buffer != nullptr)
-        {
-            LOG_TRACK("Resource: {:X}, Res: {}x{}, Format: {}", (size_t) info[index].buffer, info[index].width,
-                      info[index].height, (UINT) info[index].format);
-
-            DetachFromOldResource(index);
-        }
-
-        info[index].buffer = nullptr;
-        info[index].lastUsedFrame = 0;
+        ClearByIndex((cpuHandle - cpuStart) / increment);
     }
 
     void ClearByGpuHandle(SIZE_T gpuHandle) const
     {
-        auto index = (gpuHandle - gpuStart) / increment;
-
-        if (index >= numDescriptors)
-            return;
-
-        // std::unique_lock<std::shared_mutex> lock(mutex);
-
-        if (info[index].buffer != nullptr)
-        {
-            LOG_TRACK("Resource: {:X}, Res: {}x{}, Format: {}", (size_t) info[index].buffer, info[index].width,
-                      info[index].height, (UINT) info[index].format);
-
-            DetachFromOldResource(index);
-        }
-
-        info[index].buffer = nullptr;
-        info[index].lastUsedFrame = 0;
+        ClearByIndex((gpuHandle - gpuStart) / increment);
     }
 };
 
@@ -472,7 +491,7 @@ class ResTrack_Dx12
     static void HookToQueue(ID3D12Device* InDevice);
     static void HookResource(ID3D12Device* InDevice);
 
-    static bool CheckResource(ID3D12Resource* resource);
+    static bool CheckResource(ID3D12Resource* resource, ResourceInfo* outInfo = nullptr);
 
     static bool CheckForRealObject(const std::string functionName, IUnknown* pObject, IUnknown** ppRealObject);
 
@@ -489,11 +508,10 @@ class ResTrack_Dx12
     static HeapInfo* GetHeapByCpuHandleRTV(SIZE_T cpuHandle);
     static HeapInfo* GetHeapByCpuHandleSRV(SIZE_T cpuHandle);
     static HeapInfo* GetHeapByCpuHandleUAV(SIZE_T cpuHandle);
-    static HeapInfo* GetHeapByCpuHandle(SIZE_T cpuHandle);
+    enum class DescriptorCopyRole { Source, Destination };
+    static HeapInfo* GetHeapByCpuHandle(SIZE_T cpuHandle, DescriptorCopyRole role);
     static HeapInfo* GetHeapByGpuHandleGR(SIZE_T gpuHandle);
     static HeapInfo* GetHeapByGpuHandleCR(SIZE_T gpuHandle);
-
-    static void FillResourceInfo(ID3D12Resource* resource, ResourceInfo* info);
 
     // Sharding
     inline static constexpr size_t SHARD_COUNT = 16;
@@ -506,7 +524,6 @@ class ResTrack_Dx12
     }
 
   public:
-    static void LogLateCaptureDiagnostics();
     static bool ObserveCommandList(ID3D12GraphicsCommandList* commands);
     static void HookDevice(ID3D12Device* device);
     static void EnsureQueueHook(ID3D12Device* device);

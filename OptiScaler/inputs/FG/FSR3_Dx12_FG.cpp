@@ -1,5 +1,4 @@
 #include "pch.h"
-#include <upscalers/dlssnr/DLSSNRPipelineTrace.h>
 #include "FSR3_Dx12_FG.h"
 
 #include "Config.h"
@@ -591,7 +590,6 @@ hkffxFrameInterpolationContextCreate(FfxFrameInterpolationContext* context,
 static Fsr3::FfxErrorCode hkffxFrameInterpolationDispatch(FfxFrameInterpolationContext* context,
                                                           FfxFrameInterpolationDispatchDescription* params)
 {
-    if (params) DLSSNRPipelineTrace::Mark("fsr3-fg-input-record", params->commandList);
     if (context == nullptr || params == nullptr)
         return Fsr3::FFX_ERROR_INVALID_ARGUMENT;
 

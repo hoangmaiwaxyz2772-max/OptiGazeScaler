@@ -77,6 +77,7 @@ struct DirectInputDeviceSlot
     bool InUse = false;
     void* Device = nullptr;
     DirectInputDeviceKind Kind = DirectInputDeviceKind::Other;
+    DWORD LastObjectDataSize = 0;
 };
 
 enum class HidDeviceKind
@@ -193,6 +194,8 @@ struct InputState
 
     std::array<ButtonState, 256> Keys {};
     std::array<ButtonState, 5> MouseButtons {};
+    std::array<bool, 256> HiddenMenuPollingKeys {};
+    bool HiddenMenuPollingConfigured = false;
 
     std::array<bool, 256> RawKeyboardBlockedDown {};
     std::array<bool, 5> RawMouseBlockedDown {};
@@ -476,27 +479,32 @@ class ScopedHookBypass
     ScopedHookBypass& operator=(ScopedHookBypass&&) = delete;
 };
 
+// Dynamic input hook installation may run without the state mutex
+std::mutex& GetDetourTransactionMutex();
+
 // Lifecycle
 bool InstallHooks();
-void RemoveHooks();
-void ReleaseTrackedWindowsHooksLocked();
+bool RemoveHooks();
+bool ReleaseTrackedWindowsHooksLocked();
 
 // GameInput / Windows.Gaming.Input
-void UpdateGameInputIntegrationLocked();
-void RemoveGameInputHooksLocked();
+void UpdateGameInputIntegration();
+bool RemoveGameInputHooksLocked();
 HRESULT WINAPI hkGameInputCreate(void** gameInput);
 
 // XInput
-void UpdateXInputIntegrationLocked();
-void RemoveXInputHooksLocked();
+void UpdateXInputIntegration();
+bool RemoveXInputHooksLocked();
+void DrainXInputKeystrokesLocked();
 DWORD WINAPI hkXInputGetState(DWORD userIndex, XINPUT_STATE* state);
 DWORD WINAPI hkXInputGetStateEx(DWORD userIndex, XINPUT_STATE* state);
 DWORD WINAPI hkXInputGetKeystroke(DWORD userIndex, DWORD reserved, PXINPUT_KEYSTROKE keystroke);
 DWORD WINAPI hkXInputSetState(DWORD userIndex, XINPUT_VIBRATION* vibration);
 
 // DirectInput
-void UpdateDirectInputIntegrationLocked();
-void RemoveDirectInputHooksLocked();
+void UpdateDirectInputIntegration();
+bool RemoveDirectInputHooksLocked();
+void DrainDirectInputBufferedDataLocked();
 HRESULT WINAPI hkDirectInput8Create(HINSTANCE instance, DWORD version, REFIID riid, LPVOID* out, LPUNKNOWN outer);
 HRESULT WINAPI hkDirectInputCreateA(HINSTANCE instance, DWORD version, void** out, LPUNKNOWN outer);
 HRESULT WINAPI hkDirectInputCreateW(HINSTANCE instance, DWORD version, void** out, LPUNKNOWN outer);
@@ -512,7 +520,7 @@ ULONG WINAPI hkDirectInputDeviceRelease(void* device);
 void SetTargetWindow(HWND hwnd, bool isUwp, bool useWndProcSubclass);
 void SetInputWindow(HWND hwnd, bool useWndProcSubclass, bool explicitInputHwnd);
 bool InstallWindowSubclass(HWND hwnd);
-void RemoveWindowSubclass();
+bool RemoveWindowSubclass(bool preserveLostChain = false);
 bool TryGetWindowProc(HWND hwnd, WNDPROC* wndProc);
 void ClearTargetWindowLocked();
 void ClearInputWindowLocked();
@@ -532,6 +540,8 @@ bool ShouldApplyBlockingPolicyLocked();
 bool ShouldBlockKeyboardInputLocked();
 bool ShouldBlockMouseInputLocked();
 bool ShouldBlockCursorInputLocked();
+void HandleBlockingFocusGainLocked();
+void HandleBlockingFocusLossLocked();
 void LogInputHealthSnapshotLocked(const char* origin);
 void PollInputFallbackLocked();
 
@@ -578,7 +588,9 @@ void SanitizeRawMouseAllLocked(RAWINPUT& input);
 void SanitizeRawMouseKeepAllowedButtonUpsLocked(RAWINPUT& input, USHORT allowedButtonUpFlags);
 void SanitizeRawKeyboardLocked(RAWINPUT& input);
 int NormalizeRawKeyboardVirtualKey(const RAWKEYBOARD& keyboard);
-void HandleRawInputLocked(HRAWINPUT rawInputHandle);
+// Returns true when this packet must still reach the game because it contains an input release
+// the game is owed. The GetRawInputData hook sanitizes the packet before the game receives it.
+bool HandleRawInputLocked(HRAWINPUT rawInputHandle);
 
 // Win32 hook tracking
 bool IsTrackedWindowsHookType(int hookType);
@@ -595,7 +607,7 @@ int WindowsHookMouseMessageToButton(int hookType, WPARAM wParam, LPARAM lParam);
 HOOKPROC GetWindowsHookProxyProc(std::size_t slotIndex);
 LRESULT CALLBACK InvokeWindowsHookProxy(std::size_t slotIndex, int code, WPARAM wParam, LPARAM lParam);
 void UpdateExternalMouseHookLocked();
-void RemoveExternalMouseHookLocked();
+bool RemoveExternalMouseHookLocked();
 void EnsureExternalRawInputSinkLocked();
 void PumpExternalRawInputSinkLocked();
 void RemoveExternalRawInputSinkLocked();
